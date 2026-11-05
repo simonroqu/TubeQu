@@ -1,0 +1,214 @@
+/* Grundlayout. Farben und Rundungs-Variablen (--radius-*) kommen aus theme.rs. */
+
+/* Buttons: nur das Icon bzw. der Text, ohne Rahmen und Hintergrund.
+   Rückmeldung nur beim Überfahren und Klicken. */
+button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
+}
+
+button:hover {
+  background: alpha(currentColor, 0.1);
+}
+
+button:active {
+  background: alpha(currentColor, 0.2);
+}
+
+/* Umschalter (Tabs): aktiver Tab unterstrichen statt hinterlegt. */
+button:checked {
+  background: none;
+  box-shadow: inset 0 -2px currentColor;
+}
+
+button:checked:hover {
+  background: alpha(currentColor, 0.1);
+}
+
+/* Tab-Gruppe ohne gemeinsamen Rahmen. */
+.linked > button {
+  border-radius: var(--radius-s);
+}
+
+.avatar {
+  border-radius: 9999px;
+}
+
+/* Kanalname in Karten: sieht aus wie Text, ist aber klickbar. */
+button.channel-link {
+  padding: 0;
+  min-height: 0;
+}
+
+button.channel-link:hover label {
+  text-decoration: underline;
+}
+
+.thumb {
+  border-radius: var(--radius-s);
+}
+
+/* Geschaut-Balken unten im Thumbnail, wie bei YouTube. */
+progressbar.watched {
+  margin: 0 6px;
+}
+
+progressbar.watched trough,
+progressbar.watched progress {
+  min-height: 4px;
+  border-radius: 2px;
+}
+
+progressbar.watched trough {
+  background: alpha(white, 0.35);
+}
+
+/* Ansehen-Seite */
+.description-box {
+  padding: 12px;
+  border-radius: var(--radius-m);
+  background: alpha(currentColor, 0.06);
+}
+
+.pill {
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  background: alpha(currentColor, 0.08);
+}
+
+/* ---------- Player-Leiste: Bubble-Design ----------
+   Liegt über dem Video (hell oder dunkel), daher immer dunkles Glas mit weißem Inhalt. */
+
+.player-controls {
+  background: none;
+}
+
+/* Alle Bubbles gleich: gleiche Höhe, gleicher Innenabstand. */
+.bubble {
+  min-height: 32px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  color: white;
+  background: rgba(24, 24, 28, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35), inset 0 1px rgba(255, 255, 255, 0.10);
+}
+
+.bubble button {
+  color: white;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: var(--radius-pill);
+}
+
+.bubble button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.bubble button:active {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.bubble label {
+  color: white;
+  margin: 0 8px;
+}
+
+.bubble scale trough {
+  min-height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.bubble scale highlight {
+  min-height: 4px;
+  border-radius: 2px;
+}
+
+.bubble scale slider,
+scale.timeline slider {
+  background: white;
+  border: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* Timeline: ohne Hintergrund, etwas dicker. */
+scale.timeline trough {
+  min-height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.3);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+}
+
+scale.timeline highlight {
+  min-height: 6px;
+  border-radius: 3px;
+}
+
+scale.timeline slider {
+  min-width: 14px;
+  min-height: 14px;
+  margin: -4px;
+  border-radius: 9999px;
+}
+
+/* Kapitel-Striche unter der Timeline dezent in Weiß. */
+scale.timeline marks indicator {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* Gefüllter Teil von Timeline und Lautstärke: schlicht weiß statt Signalfarbe. */
+.bubble scale highlight,
+scale.timeline highlight {
+  background: white;
+  border: none;
+  margin: 0;
+}
+
+/* ---------- Schwebende Navigation oben links ---------- */
+.nav-bubble {
+  margin: 12px;
+}
+
+/* ---------- Suchfenster (wie Spotlight) ---------- */
+.search-backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.search-card {
+  padding: 8px;
+  border-radius: var(--radius-l);
+  color: white;
+  background: rgba(30, 30, 34, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), inset 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.search-card entry {
+  min-height: 40px;
+  font-size: 1.15em;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  background: none;
+  color: white;
+}
+
+.suggestions {
+  background: none;
+}
+
+.suggestions row {
+  padding: 8px 12px;
+  border-radius: var(--radius-m);
+  color: white;
+}
+
+.suggestions row:hover,
+.suggestions row:focus,
+.suggestions row:selected {
+  background: rgba(255, 255, 255, 0.10);
+}
