@@ -11,7 +11,7 @@ use gtk::gdk;
 use libmpv2::events::Event;
 use libmpv2::{Format, Mpv};
 use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CString, c_char, c_void};
 use std::rc::Rc;
 use std::sync::LazyLock;
@@ -23,10 +23,24 @@ pub struct Player {
     pub controls: Rc<Controls>,
     area: gtk::GLArea,
     msg: gtk::Label,
+    /// Reload-Icon unter einer Fehlermeldung.
+    pub retry: gtk::Button,
+    /// Endbildschirm: „Zur Startseite“ (verbunden in main.rs).
+    pub end_home: gtk::Button,
+    /// Kurze Einblendung mitten im Bild („+10 s“, „65 %“, „1.5×“ …).
+    flash: gtk::Label,
+    /// Wird mit `true` aufgerufen, solange ein Video läuft (Bildschirmschoner aus), sonst `false`.
+    on_playing: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
     spinner: gtk::Spinner,
     /// Wird mit dem Seitenverhältnis (Breite/Höhe) aufgerufen, sobald das Video es kennt.
     on_aspect: Rc<RefCell<Option<Box<dyn Fn(f64)>>>>,
+    /// Bekommt das yt-dlp-JSON des Videos (holt mpv beim Laden ohnehin), z. B. als Ersatz-Details.
+    on_info: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     track: Rc<RefCell<Track>>,
+    /// Video-Fläche bereit (mpv-Render-Kontext angelegt)? Vorher scheitert `loadfile` mit „No video
+    /// output“; das Video wartet dann in `pending`, bis die Fläche da ist.
+    gl_ready: Rc<Cell<bool>>,
+    pending: Rc<RefCell<Option<(String, String)>>>,
 }
 
 /// Was gerade läuft, um den Fortschritt zu speichern.
@@ -41,10 +55,12 @@ struct Track {
     /// Was zuletzt geladen wurde (URL, Optionen), für einen zweiten Versuch bei Fehlern.
     load: Option<(String, String)>,
     retried: bool,
+    /// Wann `play` lief: kurz danach keine Einblendungen (Geschwindigkeit/Lautstärke setzt `play` selbst).
+    started: Option<Instant>,
 }
 
 /// Kurzer Hinweis oben links über dem Video, verschwindet nach ein paar Sekunden von selbst.
-fn toast(label: &gtk::Label, text: &str) {
+pub fn toast(label: &gtk::Label, text: &str) {
     label.set_text(text);
     label.set_visible(true);
     let (label, text) = (label.downgrade(), text.to_string());
@@ -64,15 +80,20 @@ fn save(mpv: &Mpv, track: &RefCell<Track>) {
     let Some(v) = t.video.clone().filter(|_| !t.live) else { return };
     if let (Ok(pos), Ok(dur)) = (mpv.get_property::<f64>("time-pos"), mpv.get_property::<f64>("duration")) {
         progress::record(&v, pos, dur);
+        // Fertig geschaut: aus „Später ansehen“ nehmen.
+        if progress::get(&v.id).is_some_and(|e| e.finished()) {
+            crate::lists::remove_later(&v.id);
+        }
         t.last_save = Some(Instant::now());
     }
 }
 
-/// Zeigt eine Meldung über dem Video (rot, wenn `error`).
-fn show(msg: &gtk::Label, text: &str, error: bool) {
+/// Zeigt eine Meldung über dem Video (rot, wenn `error`); `retry` = darunter Reload-Icon anbieten.
+fn show(msg: &gtk::Label, retry: &gtk::Button, text: &str, error: bool) {
     msg.set_text(text);
     if error { msg.add_css_class("error") } else { msg.remove_css_class("error") }
     msg.set_visible(true);
+    retry.set_visible(error);
 }
 
 /// Macht aus den Fehlerzeilen von mpv/yt-dlp eine lesbare Ursache.
@@ -94,6 +115,9 @@ fn reason(log: &[String], fallback: &str) -> String {
     }
     s.to_string()
 }
+
+/// MPRIS-Plugin aus dem Paket mpv-mpris (Medientasten, Anzeige in Waybar & Co.).
+const MPRIS_PLUGIN: &str = "/usr/lib/mpv-mpris/mpris.so";
 
 // GTK4 nutzt unter Wayland (und standardmäßig auch unter X11) EGL.
 // ponytail: nur eglGetProcAddress; Mesa und NVIDIA liefern darüber auch Core-GL-Funktionen.
@@ -126,11 +150,35 @@ impl Player {
                 i.set_property("ytdl", true)?;
                 i.set_property("ytdl-format", crate::controls::format_for(crate::controls::saved_quality()))?;
                 i.set_property("hwdec", "auto-safe")?;
+                i.set_property("volume", crate::controls::saved_volume())?;
                 i.set_property("keep-open", true)?;
                 // Sprünge zum nächsten Schlüsselbild statt bildgenau: YouTube drosselt Downloads auf etwa
                 // Abspielgeschwindigkeit, bildgenaue Sprünge müssten erst Sekunden davor laden (gemessen:
                 // bis 6 s statt meist unter 1 s). Ziel liegt dadurch meist 1–2 s neben der Stelle.
                 i.set_property("hr-seek", "no")?;
+                // Puffer: so weit vorladen wie möglich, damit Sprünge nach vorn sofort laufen; Zurückspringen
+                // bleibt im schon Geladenen. mpv-Standard wäre 150 MiB vor / 50 MiB zurück.
+                // ponytail: Puffer im RAM, 1080p ≈ 2 GB/h – bei langen Videos `cache-on-disk` erwägen.
+                i.set_property("cache", "yes")?;
+                i.set_property("cache-secs", 36000)?;
+                i.set_property("demuxer-max-bytes", "1GiB")?;
+                i.set_property("demuxer-max-back-bytes", "512MiB")?;
+                // YouTube bremst große Bereichs-Anfragen auf etwa Abspielgeschwindigkeit; viele kleine Anfragen
+                // (10 MiB, wie yt-dlp selbst lädt) laufen mit voller Geschwindigkeit. Erst dadurch füllt sich
+                // der Puffer schneller als abgespielt wird. ffmpeg ≥ 9 (`request_size`); neueres mpv setzt das
+                // im ytdl_hook selbst (mpv-PR #17471), mpv 0.41 noch nicht. Unbekannt = still ignoriert.
+                i.set_property("stream-lavf-o", "request_size=10485760")?;
+                // Lautstärke angleichen (YouTube normalisiert, mpv nicht): sanft, großes Zeitfenster gegen
+                // „Pumpen“. Kein spürbarer Startverzug (getestet).
+                i.set_property("af", "lavfi=[dynaudnorm=f=250:g=15:p=0.95]")?;
+                // Untertitel: auch automatische, aber nur Deutsch/Englisch (sonst ~100 Übersetzungen).
+                // Geladen wird eine Spur erst beim Einschalten (Taste c) – keine Extra-Anfrage beim Start.
+                // Wert ohne Komma: mpv trennt die Optionen an Kommas.
+                i.set_property("ytdl-raw-options", "write-auto-subs=,sub-langs=(de|en).*")?;
+                // Medientasten und Anzeige in der Leiste (MPRIS), falls das mpv-mpris-Plugin installiert ist.
+                if std::path::Path::new(MPRIS_PLUGIN).exists() {
+                    i.set_property("scripts", MPRIS_PLUGIN)?;
+                }
                 Ok(())
             })
             .expect("mpv failed to start");
@@ -149,8 +197,15 @@ impl Player {
             ("volume", Format::Double),
             ("mute", Format::Flag),
             ("speed", Format::Double),
+            ("eof-reached", Format::Flag),
+            ("current-tracks/sub/lang", Format::String),
             ("dwidth", Format::Int64),
             ("dheight", Format::Int64),
+            ("demuxer-cache-time", Format::Double),
+            ("paused-for-cache", Format::Flag),
+            ("seeking", Format::Flag),
+            // Vom ytdl_hook gesetzt, solange das Video läuft (mpv ≥ 0.37).
+            ("user-data/mpv/ytdl/json-subprocess-result/stdout", Format::String),
         ] {
             let _ = mpv.observe_property(name, format, 0);
         }
@@ -161,9 +216,11 @@ impl Player {
         area.set_focusable(true);
 
         let ctx: Rc<RefCell<Option<RenderContext<'static>>>> = Rc::default();
+        let gl_ready: Rc<Cell<bool>> = Rc::default();
+        let pending: Rc<RefCell<Option<(String, String)>>> = Rc::default();
 
         area.connect_realize({
-            let ctx = ctx.clone();
+            let (ctx, gl_ready, pending) = (ctx.clone(), gl_ready.clone(), pending.clone());
             move |a| {
                 a.make_current();
                 if let Some(e) = a.error() {
@@ -191,13 +248,18 @@ impl Player {
                     }
                 });
                 *ctx.borrow_mut() = Some(rc);
+                gl_ready.set(true);
+                if let Some((url, opts)) = pending.take() {
+                    let _ = mpv.command("loadfile", &[&url, "replace", "-1", &opts]);
+                }
             }
         });
 
         area.connect_unrealize({
-            let ctx = ctx.clone();
+            let (ctx, gl_ready) = (ctx.clone(), gl_ready.clone());
             move |a| {
                 a.make_current();
+                gl_ready.set(false);
                 ctx.borrow_mut().take();
             }
         });
@@ -211,22 +273,54 @@ impl Player {
         });
 
         let widget = gtk::Overlay::new();
+        // Abrundung (CSS-Klasse `rounded`) schneidet auch das Video ab.
+        widget.set_overflow(gtk::Overflow::Hidden);
         let controls = Controls::new(mpv, &widget);
         let track: Rc<RefCell<Track>> = Rc::default();
 
         // Klick aufs Video: Pause umschalten. Doppelklick: Vollbild
         // (der erste Klick des Doppelklicks pausiert, der zweite hebt das wieder auf).
+        // Kurze Einblendung mitten im Bild.
+        let flash = gtk::Label::builder()
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .can_target(false)
+            .css_classes(["osd", "pill", "flash"])
+            .build();
+
+        // Doppelklick: im linken/rechten Drittel 10 s zurück/vor (wie in der YouTube-App), in der Mitte Vollbild.
         let click = gtk::GestureClick::new();
         click.connect_pressed({
-            let controls = controls.clone();
-            move |_, n, _, _| {
+            let (controls, flash) = (controls.clone(), flash.clone());
+            move |g, n, x, _| {
                 let _ = mpv.command("cycle", &["pause"]);
                 if n == 2 {
-                    controls.fullscreen.emit_clicked();
+                    let w = g.widget().map_or(1, |w| w.width()) as f64;
+                    let third = if x < w / 3.0 { -1 } else if x > w * 2.0 / 3.0 { 1 } else { 0 };
+                    if third == 0 {
+                        controls.fullscreen.emit_clicked();
+                    } else {
+                        let _ = mpv.command("seek", &[&(10 * third).to_string()]);
+                        toast(&flash, if third < 0 { "−10 s" } else { "+10 s" });
+                    }
                 }
             }
         });
         area.add_controller(click);
+
+        // Mausrad über dem Video: Lautstärke (die Einblendung kommt über das volume-Ereignis).
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        wheel.connect_scroll({
+            let controls = controls.clone();
+            move |_, _, dy| {
+                let step = if dy < 0.0 { "5" } else { "-5" };
+                let _ = mpv.command("add", &["volume", step]);
+                controls.poke();
+                glib::Propagation::Stop
+            }
+        });
+        area.add_controller(wheel);
 
         // Mausbewegung über dem Video blendet die Leiste ein.
         let motion = gtk::EventControllerMotion::new();
@@ -251,12 +345,30 @@ impl Player {
             .visible(false)
             .css_classes(["osd"])
             .build();
+        let retry = gtk::Button::builder()
+            .icon_name("tube-reload-symbolic")
+            .tooltip_text("Reload")
+            .halign(gtk::Align::Center)
+            .focusable(false)
+            .visible(false)
+            .css_classes(["flat", "osd"])
+            .cursor(&gdk::Cursor::from_name("pointer", None).unwrap())
+            .build();
+        let msg_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build();
+        msg_box.append(&msg);
+        msg_box.append(&retry);
         widget.set_child(Some(&area));
-        widget.add_overlay(&msg);
+        widget.add_overlay(&msg_box);
         // Laden: nur ein Spinner, kein Text.
         let spinner = gtk::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).visible(false).build();
         widget.add_overlay(&spinner);
         let on_aspect: Rc<RefCell<Option<Box<dyn Fn(f64)>>>> = Rc::default();
+        let on_info: Rc<RefCell<Option<Box<dyn Fn(&str)>>>> = Rc::default();
         let note = gtk::Label::builder()
             .halign(gtk::Align::Start)
             .valign(gtk::Align::Start)
@@ -266,38 +378,106 @@ impl Player {
             .css_classes(["osd", "pill"])
             .build();
         widget.add_overlay(&note);
+        widget.add_overlay(&flash);
+
+        // Endbildschirm: Nochmal / Zur Startseite (nur Icons).
+        let end_again = gtk::Button::builder().icon_name("tube-reload-symbolic").tooltip_text("Watch again").focusable(false).build();
+        let end_home = gtk::Button::builder().icon_name("tube-home-symbolic").tooltip_text("Home").focusable(false).build();
+        let end_box = gtk::Box::builder()
+            .spacing(2)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .css_classes(["bubble", "end-screen"])
+            .build();
+        end_box.append(&end_again);
+        end_box.append(&end_home);
+        end_again.connect_clicked(move |_| {
+            let _ = mpv.command("seek", &["0", "absolute"]);
+            let _ = mpv.set_property("pause", false);
+        });
+        widget.add_overlay(&end_box);
         widget.add_overlay(&controls.widget);
+        let on_playing: Rc<RefCell<Option<Box<dyn Fn(bool)>>>> = Rc::default();
 
         glib::spawn_future_local({
             let msg = msg.clone();
+            let retry = retry.clone();
             let spinner = spinner.clone();
             let on_aspect = on_aspect.clone();
+            let on_info = on_info.clone();
+            let on_playing = on_playing.clone();
+            let (flash, end_box) = (flash.clone(), end_box.clone());
             let controls = controls.clone();
             let track = track.clone();
             async move {
                 let mut log: Vec<String> = Vec::new();
+                // Erst nach dem ersten Laden zeigt der Spinner Puffern/Springen; davor regeln Start/Geladen ihn.
+                let mut loaded = false;
+                // Zustände aus den Ereignissen mitschreiben statt mpv zu fragen: `get_property` wartet, solange
+                // mpv beschäftigt ist (gemessen bis 200 ms), und hält so die Oberfläche samt Spinner an.
+                let waiting: Rc<Cell<(bool, bool)>> = Rc::default(); // (Puffer leer, springt)
+                let (mut dw, mut dh) = (0i64, 0i64);
+                let mut sub_lang: Option<String> = None;
                 while ev_rx.recv().await.is_ok() {
                     while let Some(ev) = mpv.wait_event(0.0) {
                         match ev {
                             Ok(Event::StartFile) => {
                                 log.clear();
+                                loaded = false;
+                                end_box.set_visible(false);
                                 msg.set_visible(false);
+                                retry.set_visible(false);
                                 spinner.set_visible(true);
                                 spinner.start();
                             }
                             Ok(Event::FileLoaded) => {
+                                loaded = true;
                                 spinner.stop();
                                 spinner.set_visible(false);
                                 controls.load_chapters();
                             }
                             Ok(Event::LogMessage { text, .. }) => log.push(text.trim().to_string()),
                             Ok(Event::PropertyChange { name, change, .. }) => {
-                                if name == "dwidth" || name == "dheight" {
-                                    let w = mpv.get_property::<i64>("dwidth").unwrap_or(0);
-                                    let h = mpv.get_property::<i64>("dheight").unwrap_or(0);
-                                    if let (true, Some(f)) = (w > 0 && h > 0, on_aspect.borrow().as_ref()) {
-                                        f(w as f64 / h as f64);
+                                // Puffer leer oder Sprung: Spinner zeigen, aber erst nach kurzer Zeit, damit
+                                // Sprünge innerhalb des Vorgeladenen nicht flackern.
+                                if let ("paused-for-cache" | "seeking", PropertyData::Flag(on)) = (name, &change) {
+                                    let (mut buffering, mut seeking) = waiting.get();
+                                    if name == "seeking" { seeking = *on } else { buffering = *on }
+                                    waiting.set((buffering, seeking));
+                                }
+                                if loaded && (name == "paused-for-cache" || name == "seeking") {
+                                    let is_waiting = |w: &Cell<(bool, bool)>| w.get().0 || w.get().1;
+                                    if is_waiting(&waiting) {
+                                        let (sp, w) = (spinner.downgrade(), waiting.clone());
+                                        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                                            if let Some(sp) = sp.upgrade().filter(|_| is_waiting(&w)) {
+                                                sp.set_visible(true);
+                                                sp.start();
+                                            }
+                                        });
+                                    } else {
+                                        spinner.stop();
+                                        spinner.set_visible(false);
                                     }
+                                }
+                                match (name, &change) {
+                                    (n, PropertyData::Str(json)) if n.ends_with("json-subprocess-result/stdout") => {
+                                        controls.set_storyboard(crate::youtube::storyboard_from_ytdlp(json));
+                                        if let Some(f) = on_info.borrow().as_ref() {
+                                            f(json);
+                                        }
+                                    }
+                                    ("dwidth", PropertyData::Int64(v)) => dw = *v,
+                                    ("dheight", PropertyData::Int64(v)) => dh = *v,
+                                    _ => {}
+                                }
+                                if (name == "dwidth" || name == "dheight")
+                                    && dw > 0
+                                    && dh > 0
+                                    && let Some(f) = on_aspect.borrow().as_ref()
+                                {
+                                    f(dw as f64 / dh as f64);
                                 }
                                 let due = track.borrow().last_save.is_none_or(|t| t.elapsed() >= SAVE_EVERY);
                                 if (name == "time-pos" && due) || (name == "pause" && matches!(change, PropertyData::Flag(true))) {
@@ -313,6 +493,39 @@ impl Player {
                                         toast(&note, &format!("Skipped {}", s.label));
                                     }
                                 }
+                                // Einblendungen bei Änderungen durch den Nutzer (nicht direkt nach dem Start).
+                                let quiet = track.borrow().started.is_none_or(|t| t.elapsed() < Duration::from_millis(1500));
+                                match (name, &change) {
+                                    ("volume", PropertyData::Double(v)) if loaded && !quiet => toast(&flash, &format!("{v:.0} %")),
+                                    ("mute", PropertyData::Flag(m)) if loaded && !quiet => toast(&flash, if *m { "Muted" } else { "Sound on" }),
+                                    ("speed", PropertyData::Double(s)) => {
+                                        if loaded && !quiet {
+                                            toast(&flash, &crate::controls::speed_label(*s));
+                                        }
+                                        // Geschwindigkeit pro Kanal merken (setzt `play` beim nächsten Video wieder).
+                                        if let Some(c) = track.borrow().video.as_ref().and_then(|v| v.channel_id.clone()).filter(|_| !quiet) {
+                                            crate::lists::set_channel_speed(&c, *s);
+                                        }
+                                    }
+                                    ("pause", PropertyData::Flag(p)) => {
+                                        if let Some(f) = on_playing.borrow().as_ref() {
+                                            f(!p);
+                                        }
+                                    }
+                                    ("eof-reached", PropertyData::Flag(e)) => end_box.set_visible(*e && loaded),
+                                    ("current-tracks/sub/lang", PropertyData::Str(l)) => {
+                                        if loaded {
+                                            toast(&flash, &format!("Subtitles: {l}"));
+                                        }
+                                        sub_lang = Some(l.to_string());
+                                    }
+                                    ("current-tracks/sub/lang", PropertyData::None) => {
+                                        if loaded && sub_lang.take().is_some() {
+                                            toast(&flash, "Subtitles off");
+                                        }
+                                    }
+                                    _ => {}
+                                }
                                 controls.update(name, change);
                             }
                             // Ein Fehler-Ereignis ist hier das Ende einer Datei mit Fehler.
@@ -320,19 +533,19 @@ impl Player {
                                 eprintln!("Video-Fehler: {log:?}");
                                 // YouTube verweigert gelegentlich einzelne Stream-Server kurzzeitig.
                                 // Einmal neu laden holt frische Adressen; erst dann den Fehler zeigen.
-                                let retry = {
+                                let again = {
                                     let mut t = track.borrow_mut();
-                                    let retry = (!t.retried).then(|| t.load.clone()).flatten();
+                                    let again = (!t.retried).then(|| t.load.clone()).flatten();
                                     t.retried = true;
-                                    retry
+                                    again
                                 };
-                                if let Some((url, opts)) = retry {
+                                if let Some((url, opts)) = again {
                                     let _ = mpv.command("loadfile", &[&url, "replace", "-1", &opts]);
                                 } else {
                                     let why = reason(&log, &e.to_string());
                                     spinner.stop();
                                     spinner.set_visible(false);
-                                    show(&msg, &format!("Couldn't load video:\n{why}"), true);
+                                    show(&msg, &retry, &format!("Couldn't load video:\n{why}"), true);
                                 }
                             }
                             _ => {}
@@ -342,16 +555,60 @@ impl Player {
             }
         });
 
-        Player { mpv, widget, controls, area, msg, spinner, on_aspect, track }
+        Player { mpv, widget, controls, area, msg, retry, end_home, flash, on_playing, spinner, on_aspect, on_info, track, gl_ready, pending }
+    }
+
+    /// Video-Fläche schon beim App-Start einrichten (OpenGL + mpv-Render-Kontext, gemessen ~120 ms im
+    /// GTK-Thread), nicht erst beim ersten Video-Klick. Geht erst, wenn das Fenster da ist.
+    pub fn prepare(&self) {
+        if !self.area.is_realized() {
+            self.area.realize();
+        }
+    }
+
+    pub fn connect_playing(&self, f: impl Fn(bool) + 'static) {
+        self.on_playing.replace(Some(Box::new(f)));
+    }
+
+    pub fn connect_info(&self, f: impl Fn(&str) + 'static) {
+        self.on_info.replace(Some(Box::new(f)));
     }
 
     pub fn connect_aspect(&self, f: impl Fn(f64) + 'static) {
         self.on_aspect.replace(Some(Box::new(f)));
     }
 
+    /// Fehler ohne geladenes Video (z. B. Anfragen-Limit): ohne Reload-Icon, das ginge ja auch nicht.
     pub fn show_error(&self, text: &str) {
         self.spinner.set_visible(false);
-        show(&self.msg, text, true);
+        show(&self.msg, &self.retry, text, true);
+        self.retry.set_visible(false);
+    }
+
+    /// Aktuelles Video neu laden (Reload-Icon unter Fehlern oder in der Navigation). Holt frische Stream-Adressen
+    /// und zählt daher als Anfrage; setzt an der zuletzt gespeicherten Stelle fort.
+    pub fn reload(self: &Rc<Self>) {
+        let (video, live, url) = {
+            let t = self.track.borrow();
+            let Some((url, _)) = t.load.clone() else { return };
+            (t.video.clone(), t.live, url)
+        };
+        self.msg.set_visible(false);
+        self.retry.set_visible(false);
+        self.spinner.set_visible(true);
+        self.spinner.start();
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let res = crate::bg(crate::youtube::throttle()).await;
+            // Inzwischen ein anderes Video gestartet: nichts tun.
+            if me.track.borrow().load.as_ref().is_none_or(|(u, _)| *u != url) {
+                return;
+            }
+            match res {
+                Ok(()) => me.play(video, &url, live),
+                Err(e) => me.show_error(&e),
+            }
+        });
     }
 
     /// Video abspielen; ist es bekannt, wird dort fortgesetzt, wo man aufgehört hat.
@@ -370,12 +627,20 @@ impl Player {
                 }
             });
         }
-        self.track.replace(Track { video, live, ..Default::default() });
+        // Geschwindigkeit, die zuletzt für diesen Kanal gewählt wurde (sonst normal).
+        let speed = video.as_ref().and_then(|v| v.channel_id.as_deref()).map_or(1.0, crate::lists::channel_speed);
+        let _ = self.mpv.set_property("speed", speed);
+        self.track.replace(Track { video, live, started: Some(Instant::now()), ..Default::default() });
         self.controls.reset(live);
         self.area.grab_focus();
         // loadfile <url> <flags> <index> <optionen>; index -1 = ohne Playlist-Position.
         let opts = start.map(|s| format!("start={s:.1}")).unwrap_or_default();
         self.track.borrow_mut().load = Some((url.to_string(), opts.clone()));
+        if !self.gl_ready.get() {
+            // Video-Fläche noch nicht bereit (erstes Video der Sitzung): laden, sobald sie da ist.
+            self.pending.replace(Some((url.to_string(), opts)));
+            return;
+        }
         if let Err(e) = self.mpv.command("loadfile", &[url, "replace", "-1", &opts]) {
             eprintln!("mpv loadfile: {e}");
         }
@@ -385,9 +650,14 @@ impl Player {
     pub fn stop(&self) {
         save(self.mpv, &self.track);
         self.track.replace(Track::default());
+        self.pending.take();
         let _ = self.mpv.command("stop", &[]);
         self.msg.set_visible(false);
+        self.retry.set_visible(false);
         self.spinner.set_visible(false);
+        if let Some(f) = self.on_playing.borrow().as_ref() {
+            f(false);
+        }
     }
 
     fn speed(&self, dir: i32) -> bool {
@@ -397,12 +667,29 @@ impl Player {
 
     /// Tastenkürzel wie bei YouTube. Gibt `true` zurück, wenn die Taste verwendet wurde.
     pub fn key(&self, key: gdk::Key) -> bool {
+        // Sprünge mit Einblendung; Lautstärke/Ton/Tempo blenden über ihre Ereignisse ein.
+        let jump = |s: i32| {
+            let _ = self.mpv.command("seek", &[&s.to_string()]);
+            toast(&self.flash, &if s < 0 { format!("−{} s", -s) } else { format!("+{s} s") });
+            self.controls.poke();
+            true
+        };
+        // 0–9: an 0–90 % springen (wie bei YouTube).
+        if let Some(d) = key.to_unicode().and_then(|c| c.to_digit(10)) {
+            let _ = self.mpv.command("seek", &[&(d * 10).to_string(), "absolute-percent"]);
+            self.controls.poke();
+            return true;
+        }
         let cmd: &[&str] = match key {
             gdk::Key::space | gdk::Key::k => &["cycle", "pause"],
-            gdk::Key::Left => &["seek", "-5"],
-            gdk::Key::Right => &["seek", "5"],
-            gdk::Key::j => &["seek", "-10"],
-            gdk::Key::l => &["seek", "10"],
+            gdk::Key::Left => return jump(-5),
+            gdk::Key::Right => return jump(5),
+            gdk::Key::j => return jump(-10),
+            gdk::Key::l => return jump(10),
+            // Bild für Bild (bei Pause), wie bei YouTube.
+            gdk::Key::comma => &["frame-back-step"],
+            gdk::Key::period => &["frame-step"],
+            gdk::Key::c => &["cycle", "sub"],
             gdk::Key::Up => &["add", "volume", "5"],
             gdk::Key::Down => &["add", "volume", "-5"],
             gdk::Key::m => &["cycle", "mute"],

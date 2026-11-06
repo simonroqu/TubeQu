@@ -45,6 +45,21 @@ fn radius_vars(r: Option<u32>) -> String {
     format!("window, popover {{ --radius-s: {s}px; --radius-m: {m}px; --radius-l: {l}px; --radius-pill: {pill}px; }}\n")
 }
 
+/// Tatsächliche Fenster-Abrundung von Hyprland (eigene Config + Theme), z. B. für den Player,
+/// damit seine Ecken zu den Fensterecken passen. Ohne Hyprland `None`.
+// ponytail: kurzer hyprctl-Aufruf im GTK-Thread (lokal, wenige ms), nur beim Start und Theme-Wechsel.
+fn hyprland_rounding() -> Option<u32> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let out = std::process::Command::new("hyprctl").args(["getoption", "decoration:rounding", "-j"]).output().ok()?;
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    j.get("int")?.as_u64().map(|r| r as u32)
+}
+
+/// `--radius-window`: so rund wie die Fensterecken. Reihenfolge: Hyprland, Theme-Vorgabe, 8 px.
+fn window_radius_var(hyprland: Option<u32>, theme: Option<u32>) -> String {
+    format!("window, popover {{ --radius-window: {}px; }}\n", hyprland.or(theme).unwrap_or(8))
+}
+
 /// Liest `key = "wert"`-Zeilen. Mehr braucht colors.toml nicht.
 fn parse(s: &str) -> HashMap<String, String> {
     s.lines()
@@ -101,6 +116,14 @@ scrollbar slider {{ background: alpha({fg}, 0.3); }}
 selection {{ background: alpha({accent}, 0.4); }}
 progressbar.watched progress {{ background: {red}; }}
 label link, label link:visited {{ color: {accent}; }}
+popover > contents, popover > arrow {{ background: alpha({dark}, 0.95); color: {fg}; border: 1px solid alpha({fg}, 0.12); }}
+popover > contents {{ padding: 8px; border-radius: var(--radius-l); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }}
+popover.background {{ background: none; }}
+popover label {{ color: {fg}; }}
+checkbutton {{ padding: 2px 6px; border-radius: var(--radius-s); }}
+checkbutton:hover {{ background: alpha({fg}, 0.08); }}
+checkbutton radio {{ background: none; border: 1px solid alpha({fg}, 0.35); box-shadow: none; color: {bg}; }}
+checkbutton radio:checked {{ background: {accent}; border-color: {accent}; }}
 "#
     ))
 }
@@ -114,7 +137,7 @@ fn apply(provider: &gtk::CssProvider) {
         None => (parse(DEFAULT_COLORS), css(&parse(DEFAULT_COLORS)).expect("Standard-Theme ist gültig")),
     };
     let radius = rounding(&std::fs::read_to_string(dir.join("hyprland.lua")).unwrap_or_default());
-    provider.load_from_string(&(radius_vars(radius) + &theme_css));
+    provider.load_from_string(&(radius_vars(radius) + &window_radius_var(hyprland_rounding(), radius) + &theme_css));
     if let Some(s) = gtk::Settings::default() {
         let dark = colors.get("mode").is_none_or(|m| m == "dark");
         s.set_gtk_interface_color_scheme(if dark { gtk::InterfaceColorScheme::Dark } else { gtk::InterfaceColorScheme::Light });
@@ -171,5 +194,8 @@ mod tests {
         assert!(radius_vars(None).contains("--radius-pill: 9999px"));
         assert!(radius_vars(Some(6)).contains("--radius-s: 6px; --radius-m: 9px; --radius-l: 14px; --radius-pill: 12px"));
         assert!(radius_vars(Some(0)).contains("--radius-pill: 0px"));
+        assert!(window_radius_var(Some(4), Some(6)).contains("--radius-window: 4px"));
+        assert!(window_radius_var(None, Some(6)).contains("--radius-window: 6px"));
+        assert!(window_radius_var(None, None).contains("--radius-window: 8px"));
     }
 }

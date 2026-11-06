@@ -5,7 +5,7 @@
 use gtk4 as gtk;
 use std::path::PathBuf;
 
-const ICONS: [(&str, &str); 10] = [
+const ICONS: [(&str, &str); 14] = [
     ("tube-search-symbolic", include_str!("../data/icons/tube-search-symbolic.svg")),
     ("tube-home-symbolic", include_str!("../data/icons/tube-home-symbolic.svg")),
     ("tube-back-symbolic", include_str!("../data/icons/tube-back-symbolic.svg")),
@@ -16,6 +16,10 @@ const ICONS: [(&str, &str); 10] = [
     ("tube-settings-symbolic", include_str!("../data/icons/tube-settings-symbolic.svg")),
     ("tube-fullscreen-symbolic", include_str!("../data/icons/tube-fullscreen-symbolic.svg")),
     ("tube-restore-symbolic", include_str!("../data/icons/tube-restore-symbolic.svg")),
+    ("tube-reload-symbolic", include_str!("../data/icons/tube-reload-symbolic.svg")),
+    ("tube-history-symbolic", include_str!("../data/icons/tube-history-symbolic.svg")),
+    ("tube-later-symbolic", include_str!("../data/icons/tube-later-symbolic.svg")),
+    ("tube-subtitles-symbolic", include_str!("../data/icons/tube-subtitles-symbolic.svg")),
 ];
 
 pub fn install(display: &gtk::gdk::Display) {

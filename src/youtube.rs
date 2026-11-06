@@ -68,8 +68,8 @@ pub struct Page {
 #[derive(Clone)]
 pub enum More {
     Yt(Paginator<VideoItem>),
-    /// Startseite: ab diesem Eintrag weiter.
-    Home(usize),
+    /// yt-dlp mit Login (Startseite `:ytrec`, Suche `ytsearchall:…`): ab diesem Eintrag weiter.
+    YtDlp(String, usize),
 }
 
 impl From<Paginator<VideoItem>> for Page {
@@ -124,11 +124,24 @@ fn cached(key: &str) -> Option<Page> {
     c.get(key).filter(|(t, _)| t.elapsed() < CACHE_TTL).map(|(_, p)| p.clone())
 }
 
+/// Zwischengespeicherte Seiten verwerfen (Reload soll wirklich neu laden).
+pub fn forget_cache() {
+    CACHE.lock().unwrap().clear();
+}
+
 fn store(key: String, p: &Page) {
     CACHE.lock().unwrap().insert(key, (Instant::now(), p.clone()));
 }
 
+/// Suche. Mit Browser-Login über yt-dlp, damit YouTube die Ergebnisse wie auf der Website
+/// personalisiert (Verlauf, Abos); ohne Login oder bei Fehler anonym über rustypipe.
 pub async fn search(query: String) -> Result<Page, String> {
+    if COOKIES.is_some() {
+        match ytdlp_page(format!("ytsearchall:{query}"), 0).await {
+            Ok(p) => return Ok(p),
+            Err(e) => eprintln!("Suche mit Login fehlgeschlagen, suche anonym: {e}"),
+        }
+    }
     let key = format!("search:{query}");
     if let Some(p) = cached(&key) {
         return Ok(p);
@@ -156,7 +169,7 @@ pub async fn suggestions(query: String) -> Vec<String> {
 /// Lädt die nächste Seite (Suche, Kanal, …).
 pub async fn more(m: More) -> Result<Page, String> {
     match m {
-        More::Home(start) => home_page(start).await,
+        More::YtDlp(target, start) => ytdlp_page(target, start).await,
         More::Yt(p) => {
             throttle().await?;
             let next = p.next(RP.query()).await.map_err(|e| e.to_string())?;
@@ -261,6 +274,117 @@ fn https(url: &str) -> String {
     if url.starts_with("//") { format!("https:{url}") } else { url.to_string() }
 }
 
+/// Ersatz-Details aus dem yt-dlp-JSON, das mpv beim Abspielen ohnehin holt (keine eigene Anfrage).
+/// Für Videos, bei denen rustypipe scheitert (z. B. neues Kanal-Format bei Gemeinschafts-Videos).
+/// Ohne Kanal-Logo; das holt `channel_avatar`.
+pub fn details_from_ytdlp(json: &str) -> Option<Details> {
+    let j = ytdlp_json(json)?;
+    let s = |k: &str| j.get(k).and_then(|v| v.as_str()).map(String::from);
+    let id = s("id")?;
+    let description = plain_description_markup(&s("description").unwrap_or_default());
+    Some(Details {
+        title: s("title").unwrap_or_default(),
+        description,
+        views: j.get("view_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        published: None,
+        published_at: j.get("timestamp").and_then(|v| v.as_i64()),
+        is_live: j.get("is_live").and_then(|v| v.as_bool()).unwrap_or(false),
+        channel_id: s("channel_id").unwrap_or_default(),
+        channel_name: s("channel").or_else(|| s("uploader")).unwrap_or_default(),
+        channel_avatar: None,
+        subscribers: j.get("channel_follower_count").and_then(|v| v.as_u64()),
+        id,
+    })
+}
+
+/// yt-dlp-JSON lesen. mpv liefert es als JSON-Text in Anführungszeichen: dann noch einmal auspacken.
+fn ytdlp_json(json: &str) -> Option<serde_json::Value> {
+    let j: serde_json::Value = serde_json::from_str(json).ok()?;
+    match j.as_str() {
+        Some(inner) => serde_json::from_str(inner).ok(),
+        None => Some(j),
+    }
+}
+
+/// Vorschaubilder für die Timeline: YouTube-„Storyboard“, Bögen mit `cols`×`rows` kleinen Bildern.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Storyboard {
+    pub width: i32,
+    pub height: i32,
+    pub cols: u32,
+    pub rows: u32,
+    /// Bilder pro Sekunde Video (z. B. 0,5 = alle 2 s ein Bild).
+    pub fps: f64,
+    /// Ein Bild-URL pro Bogen.
+    pub sheets: Vec<String>,
+}
+
+impl Storyboard {
+    /// Bogen und Ausschnitt (x, y) des Bilds zur Zeit `t`.
+    pub fn locate(&self, t: f64) -> (usize, i32, i32) {
+        let per_sheet = (self.cols * self.rows).max(1) as usize;
+        let last = (self.sheets.len() * per_sheet).saturating_sub(1);
+        let i = ((t.max(0.0) * self.fps) as usize).min(last);
+        let within = (i % per_sheet) as u32;
+        (i / per_sheet, (within % self.cols) as i32 * self.width, (within / self.cols) as i32 * self.height)
+    }
+}
+
+/// Storyboard mit den größten Bildern aus dem yt-dlp-JSON (holt mpv beim Laden ohnehin; die Bögen
+/// kommen vom Bilder-CDN i.ytimg.com wie die Thumbnails, nicht über das Anfragen-Limit).
+pub fn storyboard_from_ytdlp(json: &str) -> Option<Storyboard> {
+    let j = ytdlp_json(json)?;
+    let f = j.get("formats")?.as_array()?.iter()
+        .filter(|f| f.get("format_note").and_then(|v| v.as_str()) == Some("storyboard"))
+        .max_by_key(|f| f.get("width").and_then(|v| v.as_i64()).unwrap_or(0))?;
+    let num = |k: &str| f.get(k).and_then(|v| v.as_f64());
+    let sheets: Vec<String> = f.get("fragments")?.as_array()?.iter()
+        .filter_map(|x| x.get("url").and_then(|u| u.as_str()).map(String::from))
+        .collect();
+    Some(Storyboard {
+        width: num("width")? as i32,
+        height: num("height")? as i32,
+        cols: num("columns")? as u32,
+        rows: num("rows")? as u32,
+        fps: num("fps")?,
+        sheets,
+    })
+    .filter(|s| !s.sheets.is_empty() && s.cols > 0 && s.rows > 0)
+}
+
+/// Bild laden ohne Festplatten-Cache (Storyboard-Bögen; viele, nur für das laufende Video gebraucht).
+pub async fn fetch_image(url: String) -> Result<Vec<u8>, String> {
+    let _slot = THUMB_SLOTS.acquire().await.map_err(|e| e.to_string())?;
+    let res = HTTP.get(url).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
+    Ok(res.bytes().await.map_err(|e| e.to_string())?.to_vec())
+}
+
+/// Klartext-Beschreibung als Pango-Markup; Web-Adressen werden zu Links.
+// ponytail: nur http(s)-Links; Zeitstempel/Kanal-Links gibt es nur über rustypipe.
+fn plain_description_markup(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            line.split(' ')
+                .map(|w| {
+                    if w.starts_with("https://") || w.starts_with("http://") {
+                        format!("<a href=\"{0}\">{0}</a>", glib_escape(w))
+                    } else {
+                        glib_escape(w)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Kanal-Logo (URL) über die Kanal-Anfrage; die ist danach zwischengespeichert, ein Klick auf den
+/// Kanal kostet dann keine weitere Anfrage.
+pub async fn channel_avatar(id: String) -> Option<String> {
+    channel(id, false).await.ok()?.0.avatar
+}
+
 pub async fn details(id: String) -> Result<Details, String> {
     static DETAILS: LazyLock<StdMutex<HashMap<String, (Instant, Details)>>> = LazyLock::new(Default::default);
     if let Some((t, d)) = DETAILS.lock().unwrap().get(&id)
@@ -305,10 +429,14 @@ pub async fn mark_watched(id: String) -> Result<(), String> {
 }
 
 /// Ein Eintrag aus `yt-dlp -j --flat-playlist`.
-/// Shorts und angekündigte (noch nicht laufende) Streams ergeben `None`, wie bei `Page::from`.
-fn video_from_json(j: &serde_json::Value) -> Option<Video> {
+/// Shorts, angekündigte (noch nicht laufende) Streams und Videos nur für Kanalmitglieder/Premium
+/// ergeben `None`, wie bei `Page::from`.
+pub fn video_from_json(j: &serde_json::Value) -> Option<Video> {
     let s = |k: &str| j.get(k).and_then(|v| v.as_str()).map(String::from);
-    if s("url").is_some_and(|u| u.contains("/shorts/")) || s("live_status").as_deref() == Some("is_upcoming") {
+    if s("url").is_some_and(|u| u.contains("/shorts/"))
+        || s("live_status").as_deref() == Some("is_upcoming")
+        || matches!(s("availability").as_deref(), Some("subscriber_only" | "premium_only"))
+    {
         return None;
     }
     Some(Video {
@@ -326,21 +454,55 @@ fn video_from_json(j: &serde_json::Value) -> Option<Video> {
 
 /// Startseite: deine YouTube-Empfehlungen (mit Login), sonst eigene aus ähnlichen Videos.
 pub async fn home() -> Result<Page, String> {
-    if COOKIES.is_none() {
-        return own_recommendations().await;
-    }
-    match home_page(0).await {
-        Ok(p) if !p.videos.is_empty() => Ok(p),
-        Ok(_) => own_recommendations().await,
-        Err(e) => {
-            eprintln!("YouTube-Startseite nicht verfügbar, nutze eigene Empfehlungen: {e}");
-            own_recommendations().await
+    let page = if COOKIES.is_none() {
+        own_recommendations().await
+    } else {
+        match ytdlp_page(":ytrec".into(), 0).await {
+            Ok(p) if !p.videos.is_empty() => Ok(p),
+            Ok(_) => own_recommendations().await,
+            Err(e) => {
+                eprintln!("YouTube-Startseite nicht verfügbar, nutze eigene Empfehlungen: {e}");
+                own_recommendations().await
+            }
         }
+    };
+    if let Ok(p) = &page {
+        save_home(p);
     }
+    page
 }
 
-async fn home_page(start: usize) -> Result<Page, String> {
-    let key = format!("home:{start}");
+/// Letzte Startseite auf der Festplatte: beim App-Start sofort zeigen, während die neue lädt.
+fn home_file() -> PathBuf {
+    cache_dir().join("home.jsonl")
+}
+
+pub fn video_to_json(v: &Video) -> serde_json::Value {
+    serde_json::json!({
+        "id": v.id, "title": v.title, "channel": v.channel, "channel_id": v.channel_id,
+        "duration": v.duration, "live_status": if v.is_live { "is_live" } else { "not_live" },
+        "view_count": v.views, "timestamp": v.published_at,
+    })
+}
+
+fn save_home(p: &Page) {
+    let lines: Vec<String> = p.videos.iter().map(|v| video_to_json(v).to_string()).collect();
+    let _ = std::fs::write(home_file(), lines.join("\n"));
+}
+
+/// Zuletzt geladene Startseite (ohne Nachladen), `None` wenn es noch keine gibt.
+pub fn saved_home() -> Option<Page> {
+    let text = std::fs::read_to_string(home_file()).ok()?;
+    let videos: Vec<Video> =
+        text.lines().filter_map(|l| serde_json::from_str(l).ok()).filter_map(|j| video_from_json(&j)).collect();
+    (!videos.is_empty()).then_some(Page { videos, next: None })
+}
+
+/// Eine Seite aus einer yt-dlp-Liste mit Browser-Login (`:ytrec` = Startseite, `ytsearchall:…` = Suche).
+/// ponytail: yt-dlp blättert für Seite k intern ab Anfang (k Abrufe in einem Aufruf), gezählt wird 1;
+/// eigene Fortsetzungs-Token erst, wenn tiefes Scrollen häufig wird.
+async fn ytdlp_page(target: String, start: usize) -> Result<Page, String> {
+    let key = format!("ytdlp:{target}:{start}");
     if let Some(p) = cached(&key) {
         return Ok(p);
     }
@@ -349,7 +511,10 @@ async fn home_page(start: usize) -> Result<Page, String> {
     let out = tokio::process::Command::new("yt-dlp")
         .args(["--cookies-from-browser", &cookies, "--flat-playlist", "-j"])
         .args(["--playlist-start", &(start + 1).to_string(), "--playlist-end", &(start + HOME_BATCH).to_string()])
-        .arg(":ytrec")
+        // Ungefähres Datum („3 days ago“) aus dem Text der Liste, ohne zusätzliche Anfrage.
+        .args(["--extractor-args", "youtubetab:approximate_date"])
+        .arg("--")
+        .arg(&target)
         .output()
         .await
         .map_err(|e| format!("Couldn't run yt-dlp: {e}"))?;
@@ -364,7 +529,7 @@ async fn home_page(start: usize) -> Result<Page, String> {
     }
     // Weiter, solange yt-dlp eine volle Seite geliefert hat (gefilterte Einträge zählen mit).
     let lines = String::from_utf8_lossy(&out.stdout).lines().count();
-    let next = (lines >= HOME_BATCH).then_some(More::Home(start + HOME_BATCH));
+    let next = (lines >= HOME_BATCH).then(|| More::YtDlp(target, start + HOME_BATCH));
     let page = Page { videos, next };
     store(key, &page);
     Ok(page)
@@ -447,9 +612,10 @@ pub async fn channel(id: String, live: bool) -> Result<(ChannelInfo, Page), Stri
 static THUMB_SLOTS: Semaphore = Semaphore::const_new(THUMB_PARALLEL);
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
-/// Thumbnail (320×180 JPEG) als Bytes; einmal geladen, kommt es von der Festplatte.
+/// Thumbnail (480×360 JPEG, 16:9-Bild mit Balken oben/unten – `ContentFit::Cover` schneidet sie weg)
+/// als Bytes; einmal geladen, kommt es von der Festplatte. Groß genug für 4 Spalten im Vollbild.
 pub async fn thumbnail(id: String) -> Result<Vec<u8>, String> {
-    image(format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"), format!("{id}.jpg")).await
+    image(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"), format!("{id}-hq.jpg")).await
 }
 
 /// Kanal-Avatar als Bytes, ebenfalls auf der Festplatte zwischengespeichert.
@@ -477,6 +643,41 @@ async fn image(url: String, file: String) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saved_video_round_trip() {
+        let v = super::Video { id: "a".into(), title: "T".into(), channel: "C".into(), duration: Some(9), is_live: true, published_at: Some(5), ..Default::default() };
+        let back = super::video_from_json(&super::video_to_json(&v)).unwrap();
+        assert_eq!((back.id, back.title, back.duration, back.is_live, back.published_at), ("a".into(), "T".into(), Some(9), true, Some(5)));
+    }
+
+    #[test]
+    fn storyboard_lookup() {
+        let j = r#"{"formats":[
+            {"format_note":"storyboard","width":48,"height":27,"columns":10,"rows":10,"fps":0.5,"fragments":[{"url":"s0"}]},
+            {"format_note":"storyboard","width":160,"height":90,"columns":5,"rows":5,"fps":0.5,"fragments":[{"url":"a"},{"url":"b"}]},
+            {"format_note":"1080p","width":1920}]}"#;
+        let sb = super::storyboard_from_ytdlp(j).unwrap();
+        assert_eq!((sb.width, sb.cols, sb.sheets.len()), (160, 5, 2));
+        // 0,5 Bilder/s: t=0 -> Bild 0; t=14 -> Bild 7 (Reihe 1, Spalte 2); t=60 -> Bild 30 = Bogen 1, Bild 5.
+        assert_eq!(sb.locate(0.0), (0, 0, 0));
+        assert_eq!(sb.locate(14.0), (0, 2 * 160, 90));
+        assert_eq!(sb.locate(60.0), (1, 0, 90));
+        // Hinter dem Ende: letztes Bild.
+        assert_eq!(sb.locate(9999.0), (1, 4 * 160, 4 * 90));
+    }
+
+    #[test]
+    fn details_from_ytdlp_json() {
+        let j = r#"{"id":"abc","title":"T","description":"Hi <b>\nhttps://x.y/a?b=1&c=2 more","view_count":12,"channel":"C","channel_id":"UC1","channel_follower_count":5}"#;
+        let d = super::details_from_ytdlp(j).unwrap();
+        assert_eq!((d.id.as_str(), d.views, d.subscribers, d.channel_id.as_str()), ("abc", 12, Some(5), "UC1"));
+        assert_eq!(d.description, "Hi &lt;b&gt;\n<a href=\"https://x.y/a?b=1&amp;c=2\">https://x.y/a?b=1&amp;c=2</a> more");
+        assert!(super::details_from_ytdlp("kaputt").is_none());
+        // So kommt es von mpv: doppelt verpackt.
+        let wrapped = serde_json::to_string(j).unwrap();
+        assert_eq!(super::details_from_ytdlp(&wrapped).unwrap().id, "abc");
+    }
+
     use super::*;
 
     #[test]
@@ -506,6 +707,9 @@ mod tests {
         let short = serde_json::json!({"id": "s", "title": "S", "url": "https://www.youtube.com/shorts/s"});
         let upcoming = serde_json::json!({"id": "u", "title": "U", "live_status": "is_upcoming"});
         assert!(video_from_json(&short).is_none() && video_from_json(&upcoming).is_none());
+        let members = serde_json::json!({"id": "m", "title": "M", "availability": "subscriber_only"});
+        let public = serde_json::json!({"id": "p", "title": "P", "availability": "public"});
+        assert!(video_from_json(&members).is_none() && video_from_json(&public).is_some());
     }
 
     #[tokio::test(start_paused = true)]
@@ -548,7 +752,7 @@ mod tests {
         assert!(!d.title.is_empty() && !d.channel_id.is_empty());
 
         if COOKIES.is_some() {
-            let h = home_page(0).await.unwrap();
+            let h = ytdlp_page(":ytrec".into(), 0).await.unwrap();
             println!("Startseite: {} Videos, erstes: {:?}", h.videos.len(), h.videos.first().map(|v| &v.title));
             assert!(!h.videos.is_empty());
         }

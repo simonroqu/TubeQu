@@ -31,6 +31,26 @@ fn player_height(width: i32, page_height: i32, aspect: f64, fullscreen: bool) ->
     ((width as f64 / aspect).round() as i32).min(page_height)
 }
 
+/// Rand um den Player (Hintergrundfarbe), im Vollbild keiner.
+const PLAYER_MARGIN: i32 = 5;
+/// Anteil der Fensterbreite, den der Player höchstens einnimmt; links/rechts bleibt Hintergrund.
+const PLAYER_WIDTH: f64 = 0.85;
+/// Unter dieser Fensterbreite nimmt der Player die volle Breite ein.
+const FULL_WIDTH_BELOW: i32 = 1600;
+
+/// Seitenrand des Players: so viel, dass er mittig `PLAYER_WIDTH` der Breite einnimmt, mindestens
+/// `PLAYER_MARGIN`. Im Vollbild kein Rand.
+fn player_side(width: i32, fullscreen: bool) -> i32 {
+    if fullscreen {
+        return 0;
+    }
+    // Schmales Fenster: volle Breite (nur der kleine Rand).
+    if width < FULL_WIDTH_BELOW {
+        return PLAYER_MARGIN;
+    }
+    PLAYER_MARGIN.max((width as f64 * (1.0 - PLAYER_WIDTH) / 2.0).round() as i32)
+}
+
 pub struct WatchPage {
     pub widget: gtk::Overlay,
     /// Alles unter dem Video; wird im Vollbild ausgeblendet.
@@ -53,6 +73,9 @@ pub struct WatchPage {
     fullscreen: Cell<bool>,
     /// ID des angezeigten Videos und seines Kanals; verspätete Antworten anderer Videos werden verworfen.
     current: RefCell<String>,
+    /// Ersatz-Details aus yt-dlp und ob rustypipe für das aktuelle Video gescheitert ist.
+    fallback: RefCell<Option<Details>>,
+    details_failed: Cell<bool>,
     channel_id: RefCell<Option<String>>,
 }
 
@@ -135,6 +158,8 @@ impl WatchPage {
             description,
             more,
             full_description: RefCell::default(),
+            fallback: RefCell::default(),
+            details_failed: Cell::new(false),
             size: Cell::new((0, 0)),
             aspect: Cell::new(16.0 / 9.0),
             fullscreen: Cell::new(false),
@@ -176,8 +201,20 @@ impl WatchPage {
 
     fn fit_player(&self) {
         let (w, h) = self.size.get();
+        let fs = self.fullscreen.get();
+        let m = if fs { 0 } else { PLAYER_MARGIN };
+        let side = player_side(w, fs);
+        self.player.set_margin_top(m);
+        self.player.set_margin_bottom(m);
+        self.player.set_margin_start(side);
+        self.player.set_margin_end(side);
+        // Text darunter bündig zum Player, wie bisher 16 px eingerückt (bzw. 11 px mehr als der Player).
+        self.info.set_margin_start(side - PLAYER_MARGIN + 16);
+        self.info.set_margin_end(side - PLAYER_MARGIN + 16);
+        // Abgerundete Ecken wie die Fensterecken (`--radius-window`), im Vollbild eckig.
+        if fs { self.player.remove_css_class("rounded") } else { self.player.add_css_class("rounded") }
         if w > 0 && h > 0 {
-            self.player.set_size_request(-1, player_height(w, h, self.aspect.get(), self.fullscreen.get()));
+            self.player.set_size_request(-1, player_height(w - 2 * side, h - 2 * m, self.aspect.get(), fs));
         }
     }
 
@@ -197,6 +234,8 @@ impl WatchPage {
     /// Sofort zeigen, was schon bekannt ist; Details im Hintergrund laden.
     pub fn show(self: &Rc<Self>, v: &Video) {
         self.current.replace(v.id.clone());
+        self.fallback.replace(None);
+        self.details_failed.set(false);
         self.channel_id.replace(v.channel_id.clone());
         self.title.set_text(&v.title);
         self.channel_name.set_text(&v.channel);
@@ -214,9 +253,12 @@ impl WatchPage {
         self.aspect.set(16.0 / 9.0);
         self.fit_player();
         self.scroll.vadjustment().set_value(0.0);
+    }
 
+    /// Details (Beschreibung, Aufrufe, Avatar) holen. Getrennt von `show`, damit der Stream zuerst
+    /// durchs Anfragen-Limit kommt: sonst wartet das Video 2 s (`MIN_GAP`) auf die Details.
+    pub fn load_details(self: &Rc<Self>, id: String) {
         let page = self.clone();
-        let id = v.id.clone();
         glib::spawn_future_local(async move {
             let res = bg(youtube::details(id.clone())).await;
             if *page.current.borrow() != id {
@@ -226,7 +268,50 @@ impl WatchPage {
             page.loading.set_visible(false);
             match res {
                 Ok(d) => page.set_details(d),
-                Err(e) => page.meta.set_text(&format!("Details unavailable: {e}")),
+                // rustypipe scheitert: Ersatz aus yt-dlp, sobald der Player ihn hat (oder schon hat).
+                Err(e) => {
+                    eprintln!("Details über rustypipe fehlgeschlagen, nutze yt-dlp: {e}");
+                    page.details_failed.set(true);
+                    match page.fallback.take() {
+                        Some(d) => page.apply_fallback(d),
+                        // Weiter laden (Spinner), bis der Player die yt-dlp-Infos hat.
+                        None => {
+                            page.loading.set_visible(true);
+                            page.loading.start();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// yt-dlp-Infos des laufenden Videos (vom Player). Ersatz, falls rustypipe die Details nicht liefert.
+    pub fn ytdlp_info(self: &Rc<Self>, json: &str) {
+        let Some(d) = youtube::details_from_ytdlp(json).filter(|d| *self.current.borrow() == d.id) else { return };
+        if self.details_failed.get() {
+            self.apply_fallback(d);
+        } else {
+            self.fallback.replace(Some(d));
+        }
+    }
+
+    /// Ersatz-Details zeigen und das fehlende Kanal-Logo nachholen (1 Anfrage, danach zwischengespeichert).
+    fn apply_fallback(self: &Rc<Self>, d: Details) {
+        let (id, channel) = (d.id.clone(), d.channel_id.clone());
+        self.loading.stop();
+        self.loading.set_visible(false);
+        self.set_details(d);
+        if channel.is_empty() {
+            return;
+        }
+        let page = self.clone();
+        glib::spawn_future_local(async move {
+            let Some(url) = bg(youtube::channel_avatar(channel)).await else { return };
+            if *page.current.borrow() == id
+                && let Ok(bytes) = bg(youtube::avatar(url)).await
+                && let Ok(tex) = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes))
+            {
+                page.avatar.set_paintable(Some(&tex));
             }
         });
     }
@@ -288,5 +373,9 @@ mod tests {
         // Hochkant-Video (9:16): wäre riesig, also Seitenhöhe.
         assert_eq!(player_height(1280, 1400, 9.0 / 16.0, false), 1400);
         assert_eq!(player_height(1280, 1400, 16.0 / 9.0, true), 1400);
+        // Seitenrand: unter 1600 px volle Breite (5 px), sonst 85 % mittig, Vollbild = 0.
+        assert_eq!(player_side(1343, false), 5);
+        assert_eq!(player_side(2560, false), 192);
+        assert_eq!(player_side(2560, true), 0);
     }
 }

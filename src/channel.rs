@@ -87,22 +87,32 @@ impl ChannelPage {
 
     fn load(self: &Rc<Self>, live: bool) {
         let id = self.id.borrow().clone();
+        let weak = Rc::downgrade(self);
         // Eine Anfrage liefert Kanal-Infos und Videos: das Raster bekommt die Videos,
-        // die Infos kommen über diesen Kanal zum Kopfbereich.
-        let (tx, rx) = async_channel::bounded::<ChannelInfo>(1);
-        self.grid.show(async move {
-            let (info, page) = youtube::channel(id, live).await?;
-            let _ = tx.send(info).await;
-            Ok(page)
-        });
-        let me = self.clone();
-        glib::spawn_future_local(async move {
-            if let Ok(info) = rx.recv().await
-                && *me.id.borrow() == info.id
-            {
-                me.set_info(info);
+        // die Infos kommen über diesen Kanal zum Kopfbereich. (Bei Reload läuft das hier erneut.)
+        self.grid.show(move || {
+            let (tx, rx) = async_channel::bounded::<ChannelInfo>(1);
+            let weak = weak.clone();
+            glib::spawn_future_local(async move {
+                if let Ok(info) = rx.recv().await
+                    && let Some(me) = weak.upgrade()
+                    && *me.id.borrow() == info.id
+                {
+                    me.set_info(info);
+                }
+            });
+            let id = id.clone();
+            async move {
+                let (info, page) = youtube::channel(id, live).await?;
+                let _ = tx.send(info).await;
+                Ok(page)
             }
         });
+    }
+
+    /// Kanal neu laden (Reload-Knopf).
+    pub fn reload(&self) {
+        self.grid.reload();
     }
 
     fn set_info(&self, info: ChannelInfo) {

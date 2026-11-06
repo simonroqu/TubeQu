@@ -38,11 +38,36 @@ impl Entry {
     }
 }
 
-fn path() -> PathBuf {
+/// Datei in `~/.local/share/tube/`.
+pub fn data_file(name: &str) -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
-    base.join("tube/progress.tsv")
+    base.join("tube").join(name)
+}
+
+fn path() -> PathBuf {
+    data_file("progress.tsv")
+}
+
+/// Alle geschauten Videos (mit Titel), zuletzt geschaute zuerst – für die Verlauf-Seite.
+pub fn history() -> Vec<Video> {
+    let db = DB.lock().unwrap();
+    let mut v: Vec<_> = db.iter().filter(|(_, e)| !e.title.is_empty()).collect();
+    v.sort_unstable_by(|a, b| b.1.updated.cmp(&a.1.updated));
+    v.into_iter().map(|(id, e)| to_video(id, e)).collect()
+}
+
+fn to_video(id: &str, e: &Entry) -> Video {
+    Video {
+        id: id.to_string(),
+        title: e.title.clone(),
+        channel: e.channel.clone(),
+        channel_id: (!e.channel_id.is_empty()).then(|| e.channel_id.clone()),
+        duration: Some(e.dur as u32),
+        published_at: e.published_at,
+        ..Default::default()
+    }
 }
 
 fn parse(s: &str) -> HashMap<String, Entry> {
@@ -105,18 +130,7 @@ pub fn continue_watching(n: usize) -> Vec<Video> {
     let db = DB.lock().unwrap();
     let mut v: Vec<_> = db.iter().filter(|(_, e)| !e.finished() && !e.title.is_empty()).collect();
     v.sort_unstable_by(|a, b| b.1.updated.cmp(&a.1.updated));
-    v.into_iter()
-        .take(n)
-        .map(|(id, e)| Video {
-            id: id.clone(),
-            title: e.title.clone(),
-            channel: e.channel.clone(),
-            channel_id: (!e.channel_id.is_empty()).then(|| e.channel_id.clone()),
-            duration: Some(e.dur as u32),
-            published_at: e.published_at,
-            ..Default::default()
-        })
-        .collect()
+    v.into_iter().take(n).map(|(id, e)| to_video(id, e)).collect()
 }
 
 /// Stelle zum Fortsetzen, falls das Video angefangen und nicht fertig ist.

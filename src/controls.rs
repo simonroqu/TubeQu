@@ -4,6 +4,10 @@
 //! Erscheint nur bei Mausbewegung über dem Player und blendet sich nach kurzer Zeit wieder aus.
 
 use crate::grid::fmt_duration;
+use crate::youtube::Storyboard;
+use gtk::gdk;
+use gtk::gdk_pixbuf::Pixbuf;
+use std::collections::HashMap;
 use gtk4 as gtk;
 use gtk::glib;
 use gtk::prelude::*;
@@ -25,11 +29,30 @@ const QUALITIES: [(u32, &str); 6] =
 const DEFAULT_QUALITY: u32 = 1080;
 pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
-fn quality_file() -> PathBuf {
+/// Datei in `~/.config/tube/` (Qualität, Lautstärke).
+fn config_file(name: &str) -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
-    base.join("tube/quality")
+    base.join("tube").join(name)
+}
+
+fn quality_file() -> PathBuf {
+    config_file("quality")
+}
+
+/// Zuletzt eingestellte Lautstärke (0–100), bleibt über Neustarts erhalten.
+pub fn saved_volume() -> f64 {
+    std::fs::read_to_string(config_file("volume"))
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map_or(100.0, |v| v.clamp(0.0, 100.0))
+}
+
+fn save_volume(v: f64) {
+    let f = config_file("volume");
+    let _ = std::fs::create_dir_all(f.parent().unwrap());
+    let _ = std::fs::write(f, format!("{v:.0}"));
 }
 
 /// Zuletzt gewählte Qualität (bleibt über Neustarts erhalten).
@@ -46,7 +69,7 @@ pub fn format_for(height: u32) -> String {
     format!("bestvideo[height<={height}]+bestaudio/best[height<={height}]/best")
 }
 
-fn speed_label(s: f64) -> String {
+pub fn speed_label(s: f64) -> String {
     if s == 1.0 { "Normal".into() } else { format!("{s}×") }
 }
 
@@ -69,9 +92,15 @@ pub struct Controls {
     /// Bekommt beim Ausblenden einen unsichtbaren Mauszeiger.
     cursor_target: gtk::Widget,
     hide_timer: RefCell<Option<glib::SourceId>>,
-    chapters: RefCell<Vec<(f64, String)>>,
+    chapters: Rc<RefCell<Vec<(f64, String)>>>,
     /// SponsorBlock-Abschnitte, als farbige Bereiche über dem Fortschrittsbalken gezeichnet.
     segments: Rc<RefCell<Vec<Segment>>>,
+    /// Bis hierhin (Sekunden) ist das Video vorgeladen; wird hell in der Timeline gezeigt.
+    cached_until: Rc<Cell<f64>>,
+    /// Vorschau beim Überfahren der Timeline: Bild aus dem Storyboard plus Zeit/Kapitel.
+    storyboard: Rc<RefCell<Option<Storyboard>>>,
+    /// Geladene Storyboard-Bögen (None = lädt gerade).
+    sheets: Rc<RefCell<HashMap<usize, Option<Pixbuf>>>>,
     segment_layer: gtk::DrawingArea,
     pos: Cell<f64>,
     dur: Cell<f64>,
@@ -224,7 +253,29 @@ impl Controls {
         buttons.append(&bubble(&[mute.upcast_ref(), vol.upcast_ref()]));
         buttons.append(&bubble(&[time.upcast_ref()]));
         buttons.append(&gtk::Box::builder().hexpand(true).build());
-        buttons.append(&bubble(&[settings.upcast_ref(), fullscreen.upcast_ref()]));
+        // Untertitel durchschalten (wie Taste c); die Sprache blendet der Player ein.
+        let subtitles = icon_button("tube-subtitles-symbolic", "Subtitles (c)");
+        subtitles.connect_clicked(move |_| {
+            let _ = mpv.command("cycle", &["sub"]);
+        });
+        buttons.append(&bubble(&[subtitles.upcast_ref(), settings.upcast_ref(), fullscreen.upcast_ref()]));
+
+        // Vorschau über der Timeline (Bild + Zeit), folgt der Maus. Liegt in der Leiste über dem Balken;
+        // unsichtbar nimmt sie keinen Platz ein, sichtbar wächst die (unten verankerte) Leiste nach oben.
+        let preview_pic = gtk::Picture::builder().overflow(gtk::Overflow::Hidden).can_shrink(true).content_fit(gtk::ContentFit::Fill).css_classes(["preview"]).visible(false).build();
+        let preview_time = gtk::Label::builder().css_classes(["osd", "pill", "numeric"]).halign(gtk::Align::Center).max_width_chars(40).ellipsize(gtk::pango::EllipsizeMode::End).build();
+        let preview = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .halign(gtk::Align::Start)
+            .can_target(false)
+            .visible(false)
+            .build();
+        preview.append(&preview_pic);
+        preview.append(&preview_time);
+        let storyboard: Rc<RefCell<Option<Storyboard>>> = Rc::default();
+        let chapters: Rc<RefCell<Vec<(f64, String)>>> = Rc::default();
+        let sheets: Rc<RefCell<HashMap<usize, Option<Pixbuf>>>> = Rc::default();
 
         let bar = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -238,9 +289,10 @@ impl Controls {
 
         // Farbige Sponsor-Bereiche: eigene Zeichenfläche über dem Balken, genau über dessen Schiene.
         let segments: Rc<RefCell<Vec<Segment>>> = Rc::default();
+        let cached_until: Rc<Cell<f64>> = Rc::default();
         let segment_layer = gtk::DrawingArea::builder().can_target(false).build();
         segment_layer.set_draw_func({
-            let (segments, seek) = (segments.clone(), seek.downgrade());
+            let (segments, cached_until, seek) = (segments.clone(), cached_until.clone(), seek.downgrade());
             move |area, cr, _, _| {
                 let Some(seek) = seek.upgrade() else { return };
                 let segs = segments.borrow();
@@ -250,9 +302,18 @@ impl Controls {
                 while let Some(c) = child.as_ref().filter(|c| c.css_name() != "trough") {
                     child = c.next_sibling();
                 }
-                let (Some(trough), true) = (child, dur > 1.0 && !segs.is_empty()) else { return };
+                let (Some(trough), true) = (child, dur > 1.0) else { return };
                 let Some(r) = trough.compute_bounds(area) else { return };
                 let (h, y) = (r.height() as f64, r.y() as f64);
+                let x_at = |t: f64| r.x() as f64 + r.width() as f64 * (t / dur).clamp(0.0, 1.0);
+                // Vorgeladener Bereich (aktuelle Stelle bis Pufferende) heller, wie bei YouTube:
+                // dorthin springen geht ohne Warten.
+                let (pos, until) = (seek.value(), cached_until.get());
+                if until > pos {
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.3);
+                    cr.rectangle(x_at(pos), y, x_at(until) - x_at(pos), h);
+                    let _ = cr.fill();
+                }
                 // Dezent in der Schriftfarbe des Themes, keine Signalfarben.
                 let c = seek.color();
                 for s in segs.iter() {
@@ -266,7 +327,49 @@ impl Controls {
         });
         let seek_row = gtk::Overlay::builder().child(&seek).build();
         seek_row.add_overlay(&segment_layer);
+        bar.append(&preview);
         bar.append(&seek_row);
+
+        let hover = gtk::EventControllerMotion::new();
+        hover.connect_motion({
+            let (preview, pic, label, seek, storyboard, sheets, chapters) = (
+                preview.clone(),
+                preview_pic.clone(),
+                preview_time.clone(),
+                seek.downgrade(),
+                storyboard.clone(),
+                sheets.clone(),
+                chapters.clone(),
+            );
+            move |_, x, _| {
+                let Some(seek) = seek.upgrade() else { return };
+                let dur = seek.adjustment().upper();
+                // Zeit unter der Maus: Lage der Schiene ("trough") im Regler.
+                let mut child = seek.first_child();
+                while let Some(c) = child.as_ref().filter(|c| c.css_name() != "trough") {
+                    child = c.next_sibling();
+                }
+                let (Some(trough), true) = (child, dur > 1.0) else { return };
+                let Some(r) = trough.compute_bounds(&seek) else { return };
+                let t = ((x - r.x() as f64) / r.width() as f64).clamp(0.0, 1.0) * dur;
+                // Zeit und – falls vorhanden – Kapitel an dieser Stelle.
+                match chapter_at(&chapters.borrow(), t).filter(|c| !c.is_empty()) {
+                    Some(c) => label.set_text(&format!("{} · {c}", fmt_duration(t as u32))),
+                    None => label.set_text(&fmt_duration(t as u32)),
+                }
+                show_frame(&pic, &storyboard, &sheets, t);
+                // Mittig über der Maus, aber nicht über den Rand hinaus.
+                let w = preview.width().max(pic.width_request()).max(60) as f64;
+                let max = (seek.width() as f64 - w).max(0.0);
+                preview.set_margin_start((x - w / 2.0).clamp(0.0, max) as i32);
+                preview.set_visible(true);
+            }
+        });
+        hover.connect_leave({
+            let preview = preview.clone();
+            move |_| preview.set_visible(false)
+        });
+        seek.add_controller(hover);
         bar.append(&buttons);
 
         let widget = gtk::Revealer::builder()
@@ -289,9 +392,12 @@ impl Controls {
             speed_buttons,
             cursor_target: cursor_target.clone().upcast(),
             hide_timer: RefCell::default(),
-            chapters: RefCell::default(),
+            chapters,
             segments,
             segment_layer,
+            cached_until,
+            storyboard,
+            sheets,
             pos: Cell::new(0.0),
             dur: Cell::new(0.0),
             speed: Cell::new(1.0),
@@ -304,6 +410,7 @@ impl Controls {
     pub fn poke(self: &Rc<Self>) {
         self.widget.set_reveal_child(true);
         self.cursor_target.set_cursor(None);
+        self.cursor_target.remove_css_class("idle");
         if let Some(t) = self.hide_timer.take() {
             t.remove();
         }
@@ -311,6 +418,8 @@ impl Controls {
         let id = glib::timeout_add_local_once(HIDE_AFTER, move || {
             let Some(c) = weak.upgrade() else { return };
             c.hide_timer.take(); // Timer ist abgelaufen, nicht mehr entfernen.
+            // Maus ruht: Hover-Hervorhebung aus (style.css `.idle`), auch wenn die Leiste sichtbar bleibt.
+            c.cursor_target.add_css_class("idle");
             // Pausiert oder bei offenem Einstellungsmenü sichtbar bleiben.
             if !c.paused.get() && !c.settings.is_active() {
                 c.widget.set_reveal_child(false);
@@ -337,12 +446,23 @@ impl Controls {
         self.pos.set(0.0);
         self.dur.set(0.0);
         self.chapters.borrow_mut().clear();
+        self.cached_until.set(0.0);
+        self.storyboard.replace(None);
+        self.sheets.borrow_mut().clear();
         self.set_segments(vec![]);
         self.seek.clear_marks();
         self.seek.set_visible(!live);
         self.seek.set_value(0.0);
         self.update_time();
         self.poke();
+    }
+
+    /// Storyboard des laufenden Videos (aus den yt-dlp-Infos); ohne zeigt die Vorschau nur die Zeit.
+    pub fn set_storyboard(&self, sb: Option<Storyboard>) {
+        if *self.storyboard.borrow() != sb {
+            self.sheets.borrow_mut().clear();
+            self.storyboard.replace(sb);
+        }
     }
 
     pub fn set_segments(&self, segments: Vec<Segment>) {
@@ -386,6 +506,10 @@ impl Controls {
                 }
                 self.update_time();
             }
+            ("demuxer-cache-time", PropertyData::Double(t)) => {
+                self.cached_until.set(t);
+                self.segment_layer.queue_draw();
+            }
             ("duration", PropertyData::Double(d)) => {
                 self.dur.set(d);
                 self.seek.set_range(0.0, d.max(1.0));
@@ -411,7 +535,11 @@ impl Controls {
                 self.update_time();
                 self.poke();
             }
-            ("volume", PropertyData::Double(v)) => self.vol.set_value(v),
+            // Jede Änderung (Regler, Pfeiltasten) merken.
+            ("volume", PropertyData::Double(v)) => {
+                self.vol.set_value(v);
+                save_volume(v);
+            }
             ("mute", PropertyData::Flag(m)) => self.mute.set_icon_name(if m { "tube-mute-symbolic" } else { "tube-volume-symbolic" }),
             _ => {}
         }
@@ -454,5 +582,59 @@ mod tests {
         assert_eq!(speed_label(1.5), "1.5×");
         assert_eq!(speed_label(1.0), "Normal");
         assert!(format_for(720).contains("height<=720"));
+    }
+}
+
+/// Vorschaubild zur Zeit `t` zeigen. Fehlt der Bogen noch, wird er im Hintergrund geladen und
+/// danach gezeigt (solange die Maus noch dort ist); bis dahin nur die Zeit.
+fn show_frame(pic: &gtk::Picture, sb: &Rc<RefCell<Option<Storyboard>>>, sheets: &Rc<RefCell<HashMap<usize, Option<Pixbuf>>>>, t: f64) {
+    let Some(board) = sb.borrow().clone() else {
+        pic.set_visible(false);
+        return;
+    };
+    // Anzeigegröße: mindestens 192 px breit, Seitenverhältnis wie im Storyboard.
+    let w = board.width.max(192);
+    pic.set_size_request(w, w * board.height / board.width.max(1));
+    let (sheet, x, y) = board.locate(t);
+    let loaded = sheets.borrow().get(&sheet).cloned();
+    match loaded {
+        Some(Some(pixbuf)) => {
+            if x + board.width <= pixbuf.width() && y + board.height <= pixbuf.height() {
+                let frame = pixbuf.new_subpixbuf(x, y, board.width, board.height);
+                #[allow(deprecated)] // ponytail: Texture::for_pixbuf reicht für kleine Vorschaubilder
+                pic.set_paintable(Some(&gdk::Texture::for_pixbuf(&frame)));
+                pic.set_visible(true);
+            }
+        }
+        Some(None) => {} // lädt gerade
+        None => {
+            sheets.borrow_mut().insert(sheet, None);
+            let url = board.sheets[sheet].clone();
+            let (pic, sb, sheets) = (pic.downgrade(), sb.clone(), sheets.clone());
+            glib::spawn_future_local(async move {
+                let bytes = crate::bg(crate::youtube::fetch_image(url)).await;
+                let pixbuf = bytes.ok().and_then(|b| {
+                    let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+                    loader.write(&b).ok()?;
+                    loader.close().ok()?;
+                    loader.pixbuf()
+                });
+                // Inzwischen anderes Video: verwerfen (die Tabelle wurde dann geleert).
+                if !sheets.borrow().contains_key(&sheet) {
+                    return;
+                }
+                match pixbuf {
+                    Some(p) => {
+                        sheets.borrow_mut().insert(sheet, Some(p));
+                        if let Some(pic) = pic.upgrade().filter(|p| p.parent().is_some_and(|b| b.is_visible())) {
+                            show_frame(&pic, &sb, &sheets, t);
+                        }
+                    }
+                    None => {
+                        sheets.borrow_mut().remove(&sheet);
+                    }
+                }
+            });
+        }
     }
 }

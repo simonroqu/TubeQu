@@ -49,6 +49,7 @@ impl SearchModal {
             move |q: String| {
                 let q = q.trim().to_string();
                 if let (false, Some(m)) = (q.is_empty(), modal.upgrade()) {
+                    crate::lists::add_search(&q);
                     m.close();
                     on_search(q);
                 }
@@ -98,8 +99,9 @@ impl SearchModal {
                 let generation = m.generation.get() + 1;
                 m.generation.set(generation);
                 let q = e.text().trim().to_string();
+                // Leeres Feld: letzte Suchen statt Vorschlägen.
                 if q.is_empty() {
-                    m.fill(vec![]);
+                    m.fill(crate::lists::searches());
                     return;
                 }
                 glib::spawn_future_local(async move {
@@ -142,7 +144,7 @@ impl SearchModal {
 
     pub fn open(&self) {
         self.entry.set_text("");
-        self.fill(vec![]);
+        self.fill(crate::lists::searches());
         self.widget.set_visible(true);
         self.entry.grab_focus();
     }

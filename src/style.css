@@ -112,6 +112,11 @@ progressbar.watched trough {
   background: rgba(255, 255, 255, 0.24);
 }
 
+/* Maus ruht über dem Player (controls.rs): keine Hover-Hervorhebung, bis sie sich wieder bewegt. */
+.idle .bubble button:hover {
+  background: none;
+}
+
 .bubble label {
   color: white;
   margin: 0 8px;
@@ -211,4 +216,28 @@ scale.timeline highlight {
 .suggestions row:focus,
 .suggestions row:selected {
   background: rgba(255, 255, 255, 0.10);
+}
+
+/* Player mit abgerundeten Ecken wie die Fensterecken (außer im Vollbild, siehe watch.rs). */
+.rounded {
+  border-radius: var(--radius-window);
+}
+
+/* Vorschau über der Timeline (Storyboard-Bild). */
+.preview {
+  border-radius: var(--radius-s);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* Einblendung mitten im Bild (Sprung, Lautstärke, Tempo, Untertitel). */
+.flash {
+  font-size: 1.3em;
+  padding: 8px 18px;
+}
+
+/* Endbildschirm: größere Knöpfe. */
+.end-screen button {
+  min-width: 44px;
+  min-height: 44px;
 }

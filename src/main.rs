@@ -2,6 +2,7 @@ mod channel;
 mod controls;
 mod grid;
 mod icons;
+mod lists;
 mod player;
 mod progress;
 mod search;
@@ -50,6 +51,7 @@ impl Nav {
         if self.current() == "watch" && page != "watch" {
             self.player.stop();
             self.window.unfullscreen();
+            self.window.set_title(Some("Tube"));
         }
         self.stack.set_visible_child_name(page);
         self.back.set_visible(!self.history.borrow().is_empty());
@@ -119,10 +121,16 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     back.set_visible(false);
     let home = nav_button("tube-home-symbolic", "Home");
     let search_button = nav_button("tube-search-symbolic", "Search (/)");
+    let reload = nav_button("tube-reload-symbolic", "Reload (F5)");
+    let history_button = nav_button("tube-history-symbolic", "History");
+    let later_button = nav_button("tube-later-symbolic", "Watch later");
     let nav_box = gtk::Box::builder().spacing(2).css_classes(["bubble"]).build();
     nav_box.append(&back);
     nav_box.append(&home);
     nav_box.append(&search_button);
+    nav_box.append(&later_button);
+    nav_box.append(&history_button);
+    nav_box.append(&reload);
     let nav_bar = gtk::Revealer::builder()
         .child(&nav_box)
         .transition_type(gtk::RevealerTransitionType::Crossfade)
@@ -132,7 +140,12 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         .css_classes(["nav-bubble"])
         .build();
 
-    let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
+    // Nicht homogen: sonst bestimmt die breiteste (auch unsichtbare) Seite die Mindestbreite aller Seiten.
+    let stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .hhomogeneous(false)
+        .vhomogeneous(false)
+        .build();
     // Ebene 1: Seiten plus Navigation. Ebene 2 (darüber): Suchfenster und Fenster-Knöpfe.
     let page_layer = gtk::Overlay::builder().child(&stack).build();
     page_layer.add_overlay(&nav_bar);
@@ -222,13 +235,19 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |v: Video| {
             watch.show(&v);
             nav.go("watch");
-            let player = player.clone();
+            // Fenstertitel = Videotitel (Alt-Tab, Fensterliste); „Tube“ bleibt hinten dran.
+            if !v.title.is_empty() {
+                nav.window.set_title(Some(&format!("{} – Tube", v.title)));
+            }
+            let (player, watch) = (player.clone(), watch.clone());
             glib::spawn_future_local(async move {
-                // Das Laden des Streams (yt-dlp in mpv) zählt auch als Anfrage.
+                // Das Laden des Streams (yt-dlp in mpv) zählt auch als Anfrage – und kommt als Erstes dran.
+                // Details erst danach anstellen, sonst müsste der Stream 2 s auf sie warten.
                 match bg(youtube::throttle()).await {
                     Ok(()) => player.play(Some(v.clone()), &v.url(), v.is_live),
                     Err(e) => return player.show_error(&e),
                 }
+                watch.load_details(v.id.clone());
                 // Im Hintergrund im YouTube-Verlauf eintragen; Fehler sind hier nicht schlimm.
                 if let Err(e) = bg(youtube::mark_watched(v.id)).await {
                     eprintln!("Als gesehen markieren fehlgeschlagen: {e}");
@@ -266,6 +285,29 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     stack.add_named(&channel_page.widget, Some("channel"));
     stack.add_named(&watch.widget, Some("watch"));
 
+    // Reload: aktuelle Seite neu laden (Startseite/Suche, Kanal oder Video).
+    let reload_page: Rc<dyn Fn()> = Rc::new({
+        let (nav, grid, channel_page, player) = (nav.clone(), grid.clone(), channel_page.clone(), player.clone());
+        move || match nav.current().as_str() {
+            "browse" => grid.reload(),
+            "channel" => channel_page.reload(),
+            "watch" => player.reload(),
+            _ => {}
+        }
+    });
+    reload.connect_clicked({
+        let reload_page = reload_page.clone();
+        move |_| reload_page()
+    });
+    player.retry.connect_clicked({
+        let player = Rc::downgrade(&player);
+        move |_| {
+            if let Some(p) = player.upgrade() {
+                p.reload();
+            }
+        }
+    });
+
     back.connect_clicked({
         let nav = nav.clone();
         move |_| nav.back()
@@ -276,7 +318,25 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |_| {
             nav.home();
             grid.set_home(true);
-            grid.show(youtube::home());
+            grid.show(youtube::home);
+        }
+    });
+
+    // Verlauf und „Später ansehen“: lokale Listen im Raster (keine Anfragen an YouTube).
+    history_button.connect_clicked({
+        let (grid, nav) = (grid.clone(), nav.clone());
+        move |_| {
+            nav.home();
+            grid.set_home(false);
+            grid.show(|| async { Ok(youtube::Page { videos: progress::history(), next: None }) });
+        }
+    });
+    later_button.connect_clicked({
+        let (grid, nav) = (grid.clone(), nav.clone());
+        move |_| {
+            nav.home();
+            grid.set_home(false);
+            grid.show(|| async { Ok(youtube::Page { videos: lists::later(), next: None }) });
         }
     });
 
@@ -286,7 +346,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |q| {
             nav.home();
             grid.set_home(false);
-            grid.show(youtube::search(q));
+            grid.show(move || youtube::search(q.clone()));
         }
     });
     root.add_overlay(&search.widget);
@@ -311,6 +371,29 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         }
     });
     // Player-Höhe an das Seitenverhältnis des Videos anpassen.
+    // Endbildschirm „Zur Startseite“.
+    player.end_home.connect_clicked({
+        let home = home.clone();
+        move |_| home.emit_clicked()
+    });
+    // Während ein Video läuft: kein Bildschirmschoner / keine Sperre (über GTK, also systemunabhängig).
+    player.connect_playing({
+        let (app, window) = (app.clone(), window.clone());
+        let cookie = std::cell::Cell::new(0u32);
+        move |playing| {
+            if playing && cookie.get() == 0 {
+                cookie.set(app.inhibit(Some(&window), gtk::ApplicationInhibitFlags::IDLE, Some("Playing a video")));
+            } else if !playing && cookie.get() != 0 {
+                app.uninhibit(cookie.replace(0));
+            }
+        }
+    });
+
+    // yt-dlp-Infos vom Player: Ersatz, falls die Details über rustypipe scheitern.
+    player.connect_info({
+        let watch = watch.clone();
+        move |json| watch.ytdlp_info(json)
+    });
     player.connect_aspect({
         let watch = watch.clone();
         move |a| watch.set_aspect(a)
@@ -320,6 +403,8 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed({
         let (nav, window, player, search) = (nav.clone(), window.clone(), player.clone(), search.clone());
+        let (play, open_channel) = (play.clone(), open_channel.clone());
+        let reload_page = reload_page.clone();
         move |_, key, _, mods| {
             // Suchfenster offen: nur Esc schließt, alles andere gehört der Suche.
             if search.is_open() {
@@ -329,9 +414,29 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 }
                 return glib::Propagation::Proceed;
             }
+            // Strg+V: YouTube-Link aus der Zwischenablage öffnen (Video oder Kanal).
+            if key == gdk::Key::v && mods.contains(gdk::ModifierType::CONTROL_MASK) {
+                let (play, open_channel) = (play.clone(), open_channel.clone());
+                let clipboard = window.clipboard();
+                glib::spawn_future_local(async move {
+                    let Ok(Some(text)) = clipboard.read_text_future().await else { return };
+                    let text = text.trim().to_string();
+                    if let Some(id) = video_id(&text) {
+                        play(Video { id, ..Default::default() });
+                    } else if let Some((_, rest)) = text.split_once("/channel/") {
+                        open_channel(rest.split(['/', '?']).next().unwrap_or(rest).to_string());
+                    }
+                });
+                return glib::Propagation::Stop;
+            }
             // Suche öffnen: "/" (wie bei YouTube) oder Strg+K.
             if key == gdk::Key::slash || (key == gdk::Key::k && mods.contains(gdk::ModifierType::CONTROL_MASK)) {
                 search.open();
+                return glib::Propagation::Stop;
+            }
+            // Neu laden: F5 oder Strg+R.
+            if key == gdk::Key::F5 || (key == gdk::Key::r && mods.contains(gdk::ModifierType::CONTROL_MASK)) {
+                reload_page();
                 return glib::Propagation::Stop;
             }
             // Shift ist erlaubt (">" braucht es auf deutschen Tastaturen), andere Modifier nicht.
@@ -380,27 +485,30 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 open_channel(id.split(['/', '?']).next().unwrap_or(id).to_string());
             }
             Some(arg) if arg.starts_with("http") => {
-                // Per Link: Titel usw. kommen über die Details nach.
-                let v = video_id(&arg).map(|id| Video { id, ..Default::default() });
-                if let Some(v) = &v {
-                    watch.show(v);
+                // Per Link (auch aus anderen Apps über tube-links): wie ein Klick, also über das Anfragen-Limit;
+                // Titel usw. kommen über die Details nach. Andere Adressen spielt mpv direkt.
+                match video_id(&arg) {
+                    Some(id) => play(Video { id, ..Default::default() }),
+                    None => {
+                        nav.go("watch");
+                        player.play(None, &arg, false);
+                    }
                 }
-                nav.go("watch");
-                player.play(v, &arg, false);
             }
             Some(arg) => {
                 nav.home();
                 grid.set_home(false);
-                grid.show(youtube::search(arg));
+                grid.show(move || youtube::search(arg.clone()));
             }
             None if !started.get() => {
                 grid.set_home(true);
-                grid.show(youtube::home());
+                grid.show_saved(youtube::saved_home(), youtube::home);
             }
             None => {}
         }
         started.set(true);
         window.present();
+        player.prepare();
     })
 }
 
