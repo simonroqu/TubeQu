@@ -27,9 +27,24 @@ button:checked:hover {
   background: alpha(currentColor, 0.1);
 }
 
-/* Tab-Gruppe ohne gemeinsamen Rahmen. */
-.linked > button {
+/* Tabs (Kanalseite): normale Knöpfe mit dezenter Fläche, der aktive heller. Kein Unterstrich. */
+.tabs > button {
+  padding: 4px 14px;
   border-radius: var(--radius-s);
+  background: alpha(currentColor, 0.06);
+  box-shadow: none;
+  color: inherit;
+}
+
+.tabs > button:hover {
+  background: alpha(currentColor, 0.12);
+}
+
+.tabs > button:checked,
+.tabs > button:checked:hover {
+  background: alpha(currentColor, 0.2);
+  box-shadow: none;
+  color: inherit;
 }
 
 .avatar {
@@ -178,6 +193,15 @@ scale.timeline highlight {
   margin: 12px;
 }
 
+/* Nav-Bubble zeichnet ihre Form selbst (nav_shape.rs): kein CSS-Hintergrund, Rand als Padding. */
+.bubble.nav-shape {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 3px;
+  min-height: 0; /* die 32 px hält die obere Reihe (main.rs), sonst zählt die Form das als aufgeklappt */
+}
+
 /* ---------- Suchfenster (wie Spotlight) ---------- */
 .search-backdrop {
   background: rgba(0, 0, 0, 0.45);
@@ -240,4 +264,14 @@ scale.timeline highlight {
 .end-screen button {
   min-width: 44px;
   min-height: 44px;
+}
+
+/* Lade-Kreis (icons.rs `spinner`): dreht sich, solange er sichtbar ist. */
+@keyframes tube-spin {
+  to { -gtk-icon-transform: rotate(1turn); }
+}
+
+.tube-spinner {
+  animation: tube-spin 0.8s linear infinite;
+  opacity: 0.8;
 }

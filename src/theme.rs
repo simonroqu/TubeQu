@@ -128,6 +128,13 @@ checkbutton radio:checked {{ background: {accent}; border-color: {accent}; }}
     ))
 }
 
+/// Bubble-Rundung in px (wie `--radius-pill`), für die selbst gezeichnete Nav-Bubble.
+static PILL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(9999);
+
+pub fn pill() -> f32 {
+    PILL.load(std::sync::atomic::Ordering::Relaxed) as f32
+}
+
 fn apply(provider: &gtk::CssProvider) {
     let dir = current_dir().join("theme");
     let text = std::fs::read_to_string(dir.join("colors.toml")).unwrap_or_default();
@@ -137,6 +144,7 @@ fn apply(provider: &gtk::CssProvider) {
         None => (parse(DEFAULT_COLORS), css(&parse(DEFAULT_COLORS)).expect("Standard-Theme ist gültig")),
     };
     let radius = rounding(&std::fs::read_to_string(dir.join("hyprland.lua")).unwrap_or_default());
+    PILL.store(radius.map_or(9999, |r| r * 2), std::sync::atomic::Ordering::Relaxed);
     provider.load_from_string(&(radius_vars(radius) + &window_radius_var(hyprland_rounding(), radius) + &theme_css));
     if let Some(s) = gtk::Settings::default() {
         let dark = colors.get("mode").is_none_or(|m| m == "dark");

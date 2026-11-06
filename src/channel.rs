@@ -29,7 +29,7 @@ impl ChannelPage {
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         top.append(&avatar);
         top.append(&name);
-        let tabs = gtk::Box::builder().css_classes(["linked"]).build();
+        let tabs = gtk::Box::builder().spacing(6).css_classes(["tabs"]).build();
         tabs.append(&videos_tab);
         tabs.append(&live_tab);
         let header = gtk::Box::builder()
@@ -54,6 +54,8 @@ impl ChannelPage {
             }
         });
 
+        // Der Kopf hält schon Abstand zur Navigation: Raster direkt unter den Tabs.
+        grid.set_top_margin(12);
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.append(&header);
         widget.append(&grid.widget);

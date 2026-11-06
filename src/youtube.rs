@@ -99,10 +99,38 @@ static RP: LazyLock<RustyPipe> = LazyLock::new(|| {
 // dadurch laufen alle Anfragen strikt nacheinander.
 // ponytail: ein globales Limit für alles; getrennte Budgets pro Endpunkt erst, wenn nötig.
 static HISTORY: Mutex<VecDeque<Instant>> = Mutex::const_new(VecDeque::new());
+static HISTORY_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Anfragen der letzten Stunde in einer Datei (Unix-Sekunden je Zeile), damit Limit und
+/// Mindestabstand auch über Neustarts gelten (Bot-Sperre nach vielen Neustarts, 2026-11-06).
+fn requests_file() -> PathBuf {
+    cache_dir().join("requests.txt")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Zeitpunkte aus der Datei, die jünger als eine Stunde sind (als `Instant`), älteste zuerst.
+fn recent_requests(text: &str, now_unix: u64, now: Instant) -> VecDeque<Instant> {
+    let mut v: Vec<u64> = text.lines().filter_map(|l| l.trim().parse().ok()).filter(|&t| now_unix.saturating_sub(t) < 3600 && t <= now_unix).collect();
+    v.sort_unstable();
+    v.into_iter().map(|t| now.checked_sub(Duration::from_secs(now_unix - t)).unwrap_or(now)).collect()
+}
 
 /// Wartet, bis eine Anfrage erlaubt ist. Fehler, wenn das Stundenlimit erreicht ist.
 pub async fn throttle() -> Result<(), String> {
     let mut hist = HISTORY.lock().await;
+    let persist = !cfg!(test);
+    if persist && !HISTORY_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let text = std::fs::read_to_string(requests_file()).unwrap_or_default();
+        let now_unix = unix_now();
+        *hist = recent_requests(&text, now_unix, Instant::now());
+        // Datei auf die letzte Stunde kürzen.
+        let keep: String = text.lines().filter(|l| l.trim().parse::<u64>().is_ok_and(|t| now_unix.saturating_sub(t) < 3600)).map(|l| format!("{}\n", l.trim())).collect();
+        let _ = std::fs::create_dir_all(cache_dir());
+        let _ = std::fs::write(requests_file(), keep);
+    }
     let now = Instant::now();
     while hist.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(3600)) {
         hist.pop_front();
@@ -114,6 +142,12 @@ pub async fn throttle() -> Result<(), String> {
         tokio::time::sleep((*last + MIN_GAP).saturating_duration_since(now)).await;
     }
     hist.push_back(Instant::now());
+    if persist {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(requests_file()) {
+            let _ = writeln!(f, "{}", unix_now());
+        }
+    }
     Ok(())
 }
 
@@ -491,6 +525,12 @@ fn save_home(p: &Page) {
 }
 
 /// Zuletzt geladene Startseite (ohne Nachladen), `None` wenn es noch keine gibt.
+/// Gespeicherte Startseite jünger als der Cache? Dann holt ein Neustart sie nicht neu: Limit und
+/// Cache leben nur im Speicher, wiederholte Neustarts sollen nicht jedes Mal YouTube fragen.
+pub fn saved_home_fresh() -> bool {
+    std::fs::metadata(home_file()).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age < CACHE_TTL)
+}
+
 pub fn saved_home() -> Option<Page> {
     let text = std::fs::read_to_string(home_file()).ok()?;
     let videos: Vec<Video> =
@@ -499,15 +539,17 @@ pub fn saved_home() -> Option<Page> {
 }
 
 /// Eine Seite aus einer yt-dlp-Liste mit Browser-Login (`:ytrec` = Startseite, `ytsearchall:…` = Suche).
-/// ponytail: yt-dlp blättert für Seite k intern ab Anfang (k Abrufe in einem Aufruf), gezählt wird 1;
-/// eigene Fortsetzungs-Token erst, wenn tiefes Scrollen häufig wird.
+/// yt-dlp blättert für Seite k intern ab Anfang (k Abrufe in einem Aufruf): darum zählen sie als k Anfragen.
+/// ponytail: tiefes Nachladen wird dadurch langsamer (2 s je Seite); eigene Fortsetzungs-Token, falls das stört.
 async fn ytdlp_page(target: String, start: usize) -> Result<Page, String> {
     let key = format!("ytdlp:{target}:{start}");
     if let Some(p) = cached(&key) {
         return Ok(p);
     }
     let cookies = COOKIES.clone().ok_or("No browser login found")?;
-    throttle().await?;
+    for _ in 0..=start / HOME_BATCH {
+        throttle().await?;
+    }
     let out = tokio::process::Command::new("yt-dlp")
         .args(["--cookies-from-browser", &cookies, "--flat-playlist", "-j"])
         .args(["--playlist-start", &(start + 1).to_string(), "--playlist-end", &(start + HOME_BATCH).to_string()])
@@ -710,6 +752,16 @@ mod tests {
         let members = serde_json::json!({"id": "m", "title": "M", "availability": "subscriber_only"});
         let public = serde_json::json!({"id": "p", "title": "P", "availability": "public"});
         assert!(video_from_json(&members).is_none() && video_from_json(&public).is_some());
+    }
+
+    #[test]
+    fn requests_from_file() {
+        let now = Instant::now();
+        // Zu alt (> 1 h), Müll, Zukunft fliegen raus; Rest sortiert, Abstand zu jetzt bleibt.
+        let h = recent_requests("1000\nxx\n9000\n10000\n8000\n99999\n", 10_000, now);
+        assert_eq!(h.len(), 3);
+        assert_eq!(now.duration_since(h[0]), Duration::from_secs(2000));
+        assert_eq!(now.duration_since(h[2]), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]

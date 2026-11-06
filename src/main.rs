@@ -3,6 +3,7 @@ mod controls;
 mod grid;
 mod icons;
 mod lists;
+mod nav_shape;
 mod player;
 mod progress;
 mod search;
@@ -25,6 +26,40 @@ static RT: LazyLock<tokio::runtime::Runtime> =
 /// Führt `fut` im Hintergrund (tokio) aus; das Ergebnis kommt im GTK-Thread an.
 pub async fn bg<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
     RT.spawn(fut).await.expect("Hintergrund-Task abgestürzt")
+}
+
+thread_local! {
+    static BUSY_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Lade-Kreis in der Nav-Bubble (neben der Suche).
+    static BUSY_ICON: std::cell::OnceCell<gtk::Image> = const { std::cell::OnceCell::new() };
+}
+
+/// Solange ein `Busy` lebt, dreht sich der Lade-Kreis in der Nav-Bubble. Für jedes Laden
+/// (Seiten, Nachladen, Video-Details) eins anlegen und in den Ladevorgang mitnehmen.
+pub struct Busy(());
+
+impl Busy {
+    pub fn new() -> Self {
+        BUSY_COUNT.with(|c| c.set(c.get() + 1));
+        busy_update();
+        Busy(())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        BUSY_COUNT.with(|c| c.set(c.get().saturating_sub(1)));
+        busy_update();
+    }
+}
+
+fn busy_update() {
+    let on = BUSY_COUNT.with(|c| c.get()) > 0;
+    BUSY_ICON.with(|i| {
+        if let Some(i) = i.get() {
+            i.set_visible(on);
+        }
+    });
 }
 
 /// Seitenwechsel mit Verlauf für den Zurück-Button: "browse", "channel", "watch".
@@ -121,16 +156,41 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     back.set_visible(false);
     let home = nav_button("tube-home-symbolic", "Home");
     let search_button = nav_button("tube-search-symbolic", "Search (/)");
-    let reload = nav_button("tube-reload-symbolic", "Reload (F5)");
     let history_button = nav_button("tube-history-symbolic", "History");
     let later_button = nav_button("tube-later-symbolic", "Watch later");
-    let nav_box = gtk::Box::builder().spacing(2).css_classes(["bubble"]).build();
-    nav_box.append(&back);
-    nav_box.append(&home);
-    nav_box.append(&search_button);
-    nav_box.append(&later_button);
-    nav_box.append(&history_button);
-    nav_box.append(&reload);
+    // Oben: Burger, Zurück, Home, Suche. Der Burger klappt die Bubble nach unten auf (übrige Seiten).
+    let menu_button = nav_button("tube-menu-symbolic", "More");
+    let top = gtk::Box::builder().spacing(2).height_request(32).build();
+    top.append(&menu_button);
+    top.append(&back);
+    top.append(&home);
+    top.append(&search_button);
+    let busy_icon = icons::spinner(16).visible(false).margin_start(6).margin_end(6).build();
+    BUSY_ICON.with(|i| i.set(busy_icon.clone()).ok());
+    top.append(&busy_icon);
+    let extra = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).halign(gtk::Align::Start).build();
+    extra.append(&later_button);
+    extra.append(&history_button);
+    // Links ausgerichtet: nav_shape.rs misst an der Revealer-Breite, wie breit die Spalte ist.
+    let menu = gtk::Revealer::builder().child(&extra).halign(gtk::Align::Start).transition_type(gtk::RevealerTransitionType::SlideDown).build();
+    extra.set_margin_top(2);
+    let nav_box = nav_shape::NavShape::new();
+    nav_box.set_css_classes(&["bubble", "nav-shape"]);
+    nav_box.append(&top);
+    nav_box.append(&menu);
+    let set_menu: Rc<dyn Fn(bool)> = Rc::new({
+        let menu = menu.clone();
+        move |open| menu.set_reveal_child(open)
+    });
+    menu_button.connect_clicked({
+        let (menu, set_menu) = (menu.clone(), set_menu.clone());
+        move |_| set_menu(!menu.reveals_child())
+    });
+    // Nach der Auswahl wieder zuklappen.
+    for b in [&later_button, &history_button, &home, &search_button] {
+        let set_menu = set_menu.clone();
+        b.connect_clicked(move |_| set_menu(false));
+    }
     let nav_bar = gtk::Revealer::builder()
         .child(&nav_box)
         .transition_type(gtk::RevealerTransitionType::Crossfade)
@@ -166,6 +226,18 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         .default_height(860)
         .decorated(false)
         .build();
+    // Klick neben das offene Menü klappt es zu. Der Klick geht trotzdem weiter an sein Ziel.
+    let outside = gtk::GestureClick::builder().button(0).propagation_phase(gtk::PropagationPhase::Capture).build();
+    outside.connect_pressed({
+        let (window, nav_box, menu, set_menu) = (window.clone(), nav_box.clone(), menu.clone(), set_menu.clone());
+        move |_, _, x, y| {
+            let inside = window.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|w| w.is_ancestor(&nav_box));
+            if menu.reveals_child() && !inside {
+                set_menu(false);
+            }
+        }
+    });
+    window.add_controller(outside);
     if tiling_wm() {
         window.set_child(Some(&root));
     } else {
@@ -295,10 +367,6 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
             _ => {}
         }
     });
-    reload.connect_clicked({
-        let reload_page = reload_page.clone();
-        move |_| reload_page()
-    });
     player.retry.connect_clicked({
         let player = Rc::downgrade(&player);
         move |_| {
@@ -313,38 +381,55 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |_| nav.back()
     });
 
-    home.connect_clicked({
-        let (grid, nav) = (grid.clone(), nav.clone());
-        move |_| {
-            nav.home();
-            grid.set_home(true);
-            grid.show(youtube::home);
+    // Welche Liste das Raster zeigt ("home", "later", "history", sonst ""). Klick auf den Knopf der
+    // Seite, auf der man schon ist, lädt sie neu (gilt für jeden Seiten-Knopf in der Bubble).
+    let section: Rc<std::cell::Cell<&'static str>> = Rc::default();
+    let nav_to = {
+        let (nav, section, reload_page) = (nav.clone(), section.clone(), reload_page.clone());
+        move |name: &'static str, open: Box<dyn Fn()>| {
+            let (nav, section, reload_page) = (nav.clone(), section.clone(), reload_page.clone());
+            move |_: &gtk::Button| {
+                if nav.current() == "browse" && section.get() == name {
+                    reload_page();
+                } else {
+                    nav.home();
+                    section.set(name);
+                    open();
+                }
+            }
         }
-    });
+    };
+    home.connect_clicked(nav_to("home", {
+        let grid = grid.clone();
+        // Gespeicherte Startseite sofort, die neue ersetzt sie (Lade-Kreis in der Bubble).
+        Box::new(move || {
+            grid.set_home(true);
+            grid.show_saved(youtube::saved_home(), youtube::home);
+        })
+    }));
 
     // Verlauf und „Später ansehen“: lokale Listen im Raster (keine Anfragen an YouTube).
-    history_button.connect_clicked({
-        let (grid, nav) = (grid.clone(), nav.clone());
-        move |_| {
-            nav.home();
+    history_button.connect_clicked(nav_to("history", {
+        let grid = grid.clone();
+        Box::new(move || {
             grid.set_home(false);
             grid.show(|| async { Ok(youtube::Page { videos: progress::history(), next: None }) });
-        }
-    });
-    later_button.connect_clicked({
-        let (grid, nav) = (grid.clone(), nav.clone());
-        move |_| {
-            nav.home();
+        })
+    }));
+    later_button.connect_clicked(nav_to("later", {
+        let grid = grid.clone();
+        Box::new(move || {
             grid.set_home(false);
             grid.show(|| async { Ok(youtube::Page { videos: lists::later(), next: None }) });
-        }
-    });
+        })
+    }));
 
     // Schwebendes Suchfenster über allem.
     let search = search::SearchModal::new({
-        let (grid, nav) = (grid.clone(), nav.clone());
+        let (grid, nav, section) = (grid.clone(), nav.clone(), section.clone());
         move |q| {
             nav.home();
+            section.set("");
             grid.set_home(false);
             grid.show(move || youtube::search(q.clone()));
         }
@@ -434,7 +519,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 search.open();
                 return glib::Propagation::Stop;
             }
-            // Neu laden: F5 oder Strg+R.
+            // Neu laden: F5, Strg+R oder R.
             if key == gdk::Key::F5 || (key == gdk::Key::r && mods.contains(gdk::ModifierType::CONTROL_MASK)) {
                 reload_page();
                 return glib::Propagation::Stop;
@@ -451,6 +536,10 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 }
                 gdk::Key::Escape => {
                     nav.back();
+                    true
+                }
+                gdk::Key::r | gdk::Key::R => {
+                    reload_page();
                     true
                 }
                 gdk::Key::f if watching => {
@@ -497,12 +586,21 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
             }
             Some(arg) => {
                 nav.home();
+                section.set("");
                 grid.set_home(false);
                 grid.show(move || youtube::search(arg.clone()));
             }
             None if !started.get() => {
+                section.set("home");
                 grid.set_home(true);
-                grid.show_saved(youtube::saved_home(), youtube::home);
+                // Frisch gespeicherte Startseite: beim Start nicht neu holen (nur beim ersten Lauf;
+                // Reload/Home fragen danach normal).
+                let saved = youtube::saved_home();
+                let skip = std::cell::Cell::new(saved.is_some() && youtube::saved_home_fresh());
+                grid.show_saved(saved, move || {
+                    let skip = skip.replace(false);
+                    async move { if skip { Ok(youtube::Page { videos: Vec::new(), next: None }) } else { youtube::home().await } }
+                });
             }
             None => {}
         }

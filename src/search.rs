@@ -18,6 +18,8 @@ pub struct SearchModal {
     list: gtk::ListBox,
     /// Verspätete Vorschläge zu altem Text verwerfen.
     generation: Cell<u64>,
+    /// Zuletzt abgeschickte Suche: steht beim nächsten Öffnen wieder im Feld.
+    last: std::cell::RefCell<String>,
 }
 
 impl SearchModal {
@@ -41,7 +43,7 @@ impl SearchModal {
         widget.append(&card);
         widget.append(&gtk::Box::builder().hexpand(true).build());
 
-        let modal = Rc::new(SearchModal { widget, entry, list, generation: Cell::new(0) });
+        let modal = Rc::new(SearchModal { widget, entry, list, generation: Cell::new(0), last: Default::default() });
         let on_search: Rc<dyn Fn(String)> = Rc::new(on_search);
 
         let submit = {
@@ -50,6 +52,7 @@ impl SearchModal {
                 let q = q.trim().to_string();
                 if let (false, Some(m)) = (q.is_empty(), modal.upgrade()) {
                     crate::lists::add_search(&q);
+                    m.last.replace(q.clone());
                     m.close();
                     on_search(q);
                 }
@@ -99,8 +102,9 @@ impl SearchModal {
                 let generation = m.generation.get() + 1;
                 m.generation.set(generation);
                 let q = e.text().trim().to_string();
-                // Leeres Feld: letzte Suchen statt Vorschlägen.
-                if q.is_empty() {
+                // Leeres Feld oder unveränderte letzte Suche: letzte Suchen statt Vorschlägen
+                // (Öffnen soll keine Anfrage auslösen).
+                if q.is_empty() || q == *m.last.borrow() {
                     m.fill(crate::lists::searches());
                     return;
                 }
@@ -143,10 +147,12 @@ impl SearchModal {
     }
 
     pub fn open(&self) {
-        self.entry.set_text("");
+        self.entry.set_text(&self.last.borrow());
         self.fill(crate::lists::searches());
         self.widget.set_visible(true);
         self.entry.grab_focus();
+        // Alles markiert: Weitertippen ersetzt die alte Suche.
+        self.entry.select_region(0, -1);
     }
 
     pub fn close(&self) {

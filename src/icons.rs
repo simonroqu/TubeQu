@@ -5,7 +5,7 @@
 use gtk4 as gtk;
 use std::path::PathBuf;
 
-const ICONS: [(&str, &str); 14] = [
+const ICONS: [(&str, &str); 16] = [
     ("tube-search-symbolic", include_str!("../data/icons/tube-search-symbolic.svg")),
     ("tube-home-symbolic", include_str!("../data/icons/tube-home-symbolic.svg")),
     ("tube-back-symbolic", include_str!("../data/icons/tube-back-symbolic.svg")),
@@ -20,7 +20,16 @@ const ICONS: [(&str, &str); 14] = [
     ("tube-history-symbolic", include_str!("../data/icons/tube-history-symbolic.svg")),
     ("tube-later-symbolic", include_str!("../data/icons/tube-later-symbolic.svg")),
     ("tube-subtitles-symbolic", include_str!("../data/icons/tube-subtitles-symbolic.svg")),
+    ("tube-menu-symbolic", include_str!("../data/icons/tube-menu-symbolic.svg")),
+    ("tube-spinner-symbolic", include_str!("../data/icons/tube-spinner-symbolic.svg")),
 ];
+
+/// Lade-Kreis: eigenes Icon, per CSS gedreht (`.tube-spinner` in style.css), sichtbar = läuft.
+/// Statt `gtk::Spinner`: der friert in GTK 4.24 ein, sobald er einmal ausgeblendet war
+/// (auch durch Seitenwechsel), und dreht sich nach dem Wiedereinblenden nicht mehr.
+pub fn spinner(size: i32) -> gtk::builders::ImageBuilder {
+    gtk::Image::builder().icon_name("tube-spinner-symbolic").pixel_size(size).css_classes(["tube-spinner"])
+}
 
 pub fn install(display: &gtk::gdk::Display) {
     // Lose Dateien direkt im Suchpfad findet GTK ohne Theme-Struktur.

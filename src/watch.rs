@@ -63,7 +63,8 @@ pub struct WatchPage {
     channel_name: gtk::Label,
     subscribers: gtk::Label,
     meta: gtk::Label,
-    loading: gtk::Spinner,
+    /// Details geladen: erst dann erscheint die Info unter dem Video (vorher nur der Player).
+    ready: Cell<bool>,
     description: gtk::Label,
     more: gtk::Button,
     full_description: RefCell<String>,
@@ -107,7 +108,6 @@ impl WatchPage {
         channel_row.append(&name_col);
 
         let meta = text(&["heading"]);
-        let loading = gtk::Spinner::builder().halign(gtk::Align::Start).visible(false).build();
         let description = text(&[]);
         description.set_use_markup(true);
         description.connect_activate_link(move |_, uri| {
@@ -116,7 +116,6 @@ impl WatchPage {
         });
         let more = gtk::Button::builder().label(SHOW_MORE).halign(gtk::Align::Start).focusable(false).css_classes(["flat"]).build();
         let desc_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["description-box"]).build();
-        desc_box.append(&loading);
         desc_box.append(&meta);
         desc_box.append(&description);
         desc_box.append(&more);
@@ -154,7 +153,7 @@ impl WatchPage {
             channel_name,
             subscribers,
             meta,
-            loading,
+            ready: Cell::new(false),
             description,
             more,
             full_description: RefCell::default(),
@@ -224,9 +223,13 @@ impl WatchPage {
         self.fit_player();
     }
 
+    fn update_info(&self) {
+        self.info.set_visible(self.ready.get() && !self.fullscreen.get());
+    }
+
     pub fn set_fullscreen(&self, fullscreen: bool) {
         self.fullscreen.set(fullscreen);
-        self.info.set_visible(!fullscreen);
+        self.update_info();
         self.scroll.vadjustment().set_value(0.0);
         self.fit_player();
     }
@@ -247,8 +250,8 @@ impl WatchPage {
         self.full_description.replace(String::new());
         self.more.set_label(SHOW_MORE);
         self.more.set_visible(false);
-        self.loading.set_visible(true);
-        self.loading.start();
+        self.ready.set(false);
+        self.update_info();
         // Bis das neue Video sein Format meldet: 16:9 annehmen.
         self.aspect.set(16.0 / 9.0);
         self.fit_player();
@@ -259,26 +262,22 @@ impl WatchPage {
     /// durchs Anfragen-Limit kommt: sonst wartet das Video 2 s (`MIN_GAP`) auf die Details.
     pub fn load_details(self: &Rc<Self>, id: String) {
         let page = self.clone();
+        let busy = crate::Busy::new();
         glib::spawn_future_local(async move {
             let res = bg(youtube::details(id.clone())).await;
+            drop(busy);
             if *page.current.borrow() != id {
                 return;
             }
-            page.loading.stop();
-            page.loading.set_visible(false);
             match res {
                 Ok(d) => page.set_details(d),
                 // rustypipe scheitert: Ersatz aus yt-dlp, sobald der Player ihn hat (oder schon hat).
                 Err(e) => {
                     eprintln!("Details über rustypipe fehlgeschlagen, nutze yt-dlp: {e}");
                     page.details_failed.set(true);
-                    match page.fallback.take() {
-                        Some(d) => page.apply_fallback(d),
-                        // Weiter laden (Spinner), bis der Player die yt-dlp-Infos hat.
-                        None => {
-                            page.loading.set_visible(true);
-                            page.loading.start();
-                        }
+                    // Sonst kommt der Ersatz, sobald der Player die yt-dlp-Infos hat (`ytdlp_info`).
+                    if let Some(d) = page.fallback.take() {
+                        page.apply_fallback(d);
                     }
                 }
             }
@@ -298,8 +297,6 @@ impl WatchPage {
     /// Ersatz-Details zeigen und das fehlende Kanal-Logo nachholen (1 Anfrage, danach zwischengespeichert).
     fn apply_fallback(self: &Rc<Self>, d: Details) {
         let (id, channel) = (d.id.clone(), d.channel_id.clone());
-        self.loading.stop();
-        self.loading.set_visible(false);
         self.set_details(d);
         if channel.is_empty() {
             return;
@@ -340,6 +337,8 @@ impl WatchPage {
         self.description.set_markup(&short);
         self.more.set_visible(short != full);
         self.full_description.replace(full);
+        self.ready.set(true);
+        self.update_info();
 
         if let Some(url) = d.channel_avatar {
             let img = self.avatar.downgrade();

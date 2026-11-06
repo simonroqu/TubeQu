@@ -31,7 +31,7 @@ pub struct Player {
     flash: gtk::Label,
     /// Wird mit `true` aufgerufen, solange ein Video läuft (Bildschirmschoner aus), sonst `false`.
     on_playing: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
-    spinner: gtk::Spinner,
+    spinner: gtk::Image,
     /// Wird mit dem Seitenverhältnis (Breite/Höhe) aufgerufen, sobald das Video es kennt.
     on_aspect: Rc<RefCell<Option<Box<dyn Fn(f64)>>>>,
     /// Bekommt das yt-dlp-JSON des Videos (holt mpv beim Laden ohnehin), z. B. als Ersatz-Details.
@@ -309,19 +309,6 @@ impl Player {
         });
         area.add_controller(click);
 
-        // Mausrad über dem Video: Lautstärke (die Einblendung kommt über das volume-Ereignis).
-        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
-        wheel.connect_scroll({
-            let controls = controls.clone();
-            move |_, _, dy| {
-                let step = if dy < 0.0 { "5" } else { "-5" };
-                let _ = mpv.command("add", &["volume", step]);
-                controls.poke();
-                glib::Propagation::Stop
-            }
-        });
-        area.add_controller(wheel);
-
         // Mausbewegung über dem Video blendet die Leiste ein.
         let motion = gtk::EventControllerMotion::new();
         motion.connect_motion({
@@ -365,7 +352,7 @@ impl Player {
         widget.set_child(Some(&area));
         widget.add_overlay(&msg_box);
         // Laden: nur ein Spinner, kein Text.
-        let spinner = gtk::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).visible(false).build();
+        let spinner = crate::icons::spinner(32).halign(gtk::Align::Center).valign(gtk::Align::Center).visible(false).build();
         widget.add_overlay(&spinner);
         let on_aspect: Rc<RefCell<Option<Box<dyn Fn(f64)>>>> = Rc::default();
         let on_info: Rc<RefCell<Option<Box<dyn Fn(&str)>>>> = Rc::default();
@@ -429,11 +416,9 @@ impl Player {
                                 msg.set_visible(false);
                                 retry.set_visible(false);
                                 spinner.set_visible(true);
-                                spinner.start();
                             }
                             Ok(Event::FileLoaded) => {
                                 loaded = true;
-                                spinner.stop();
                                 spinner.set_visible(false);
                                 controls.load_chapters();
                             }
@@ -453,11 +438,9 @@ impl Player {
                                         glib::timeout_add_local_once(Duration::from_millis(300), move || {
                                             if let Some(sp) = sp.upgrade().filter(|_| is_waiting(&w)) {
                                                 sp.set_visible(true);
-                                                sp.start();
                                             }
                                         });
                                     } else {
-                                        spinner.stop();
                                         spinner.set_visible(false);
                                     }
                                 }
@@ -543,7 +526,6 @@ impl Player {
                                     let _ = mpv.command("loadfile", &[&url, "replace", "-1", &opts]);
                                 } else {
                                     let why = reason(&log, &e.to_string());
-                                    spinner.stop();
                                     spinner.set_visible(false);
                                     show(&msg, &retry, &format!("Couldn't load video:\n{why}"), true);
                                 }
@@ -596,7 +578,6 @@ impl Player {
         self.msg.set_visible(false);
         self.retry.set_visible(false);
         self.spinner.set_visible(true);
-        self.spinner.start();
         let me = self.clone();
         glib::spawn_future_local(async move {
             let res = crate::bg(crate::youtube::throttle()).await;
@@ -690,8 +671,9 @@ impl Player {
             gdk::Key::comma => &["frame-back-step"],
             gdk::Key::period => &["frame-step"],
             gdk::Key::c => &["cycle", "sub"],
-            gdk::Key::Up => &["add", "volume", "5"],
-            gdk::Key::Down => &["add", "volume", "-5"],
+            // Lautstärke: + / - (auch Ziffernblock) und Pfeile hoch/runter.
+            gdk::Key::Up | gdk::Key::plus | gdk::Key::KP_Add => &["add", "volume", "5"],
+            gdk::Key::Down | gdk::Key::minus | gdk::Key::KP_Subtract => &["add", "volume", "-5"],
             gdk::Key::m => &["cycle", "mute"],
             gdk::Key::greater => return self.speed(1),
             gdk::Key::less => return self.speed(-1),

@@ -183,11 +183,46 @@ fn load_thumb(pic: &gtk::Picture, id: String) {
     let pic = pic.downgrade();
     glib::spawn_future_local(async move {
         let Ok(bytes) = bg(youtube::thumbnail(id)).await else { return };
-        let Ok(tex) = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) else { return };
+        let Some(tex) = without_bars(&bytes).or_else(|| gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok())
+        else {
+            return;
+        };
         if let Some(pic) = pic.upgrade() {
             pic.set_paintable(Some(&tex));
         }
     });
+}
+
+/// Vorschaubild ohne schwarze Balken oben/unten. YouTube liefert 4:3 mit eingebrannten Balken,
+/// bei Kinoformat oder Balken im Video selbst dicker als der 16:9-Zuschnitt (`ContentFit::Cover`)
+/// wegschneidet. Der Rest wird dann auf 16:9 gezoomt.
+fn without_bars(bytes: &[u8]) -> Option<gdk::Texture> {
+    let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+    loader.write(bytes).ok()?;
+    loader.close().ok()?;
+    let pb = loader.pixbuf()?;
+    let (w, h, n, stride) = (pb.width(), pb.height(), pb.n_channels() as usize, pb.rowstride() as usize);
+    let px = pb.read_pixel_bytes();
+    // Zeile gilt als Balken, wenn jedes 8. Pixel fast schwarz ist (JPEG-Rauschen erlaubt).
+    let dark = |y: i32| (0..w).step_by(8).all(|x| px[y as usize * stride + x as usize * n..][..3].iter().all(|&c| c <= 24));
+    let (top, bottom) = bars(h, dark);
+    if top == 0 && bottom == 0 {
+        return None;
+    }
+    #[allow(deprecated)] // ponytail: Texture::for_pixbuf reicht für kleine Vorschaubilder (wie controls.rs)
+    Some(gdk::Texture::for_pixbuf(&pb.new_subpixbuf(0, top, w, h - top - bottom)))
+}
+
+/// Dicke der dunklen Balken oben und unten, je höchstens 30 % (sonst ist das Bild einfach dunkel).
+/// Ein Pixel mehr, weil die Kante im JPEG verschmiert.
+fn bars(h: i32, dark: impl Fn(i32) -> bool) -> (i32, i32) {
+    let max = h * 3 / 10;
+    let count = |rows: &mut dyn Iterator<Item = i32>| match rows.take_while(|&y| dark(y)).count() as i32 {
+        0 => 0,
+        n if n >= max => 0,
+        n => n + 1,
+    };
+    (count(&mut (0..max)), count(&mut (0..max).map(|y| h - 1 - y)))
 }
 
 /// Kleinste Kartenbreite plus Abstand, um aus der verfügbaren Breite die Spaltenzahl zu berechnen.
@@ -226,9 +261,9 @@ pub struct Grid {
     shelf: gtk::Box,
     shelf_cards: gtk::Box,
     status: gtk::Label,
-    spinner: gtk::Spinner,
+    spinner: gtk::Image,
     footer: gtk::Label,
-    footer_spinner: gtk::Spinner,
+    footer_spinner: gtk::Image,
     on_play: Rc<dyn Fn(Video)>,
     on_channel: Rc<dyn Fn(String)>,
     videos: RefCell<Vec<Video>>,
@@ -251,19 +286,31 @@ pub struct Grid {
     /// Wird bei jedem neuen Inhalt erhöht, damit verspätete Antworten alter Suchen verworfen werden.
     generation: Cell<u64>,
     /// Startet die zuletzt gezeigte Anfrage erneut (für Reload).
-    last: RefCell<Option<Rc<dyn Fn(&Rc<Grid>)>>>,
+    last: RefCell<Option<Rc<dyn Fn(&Rc<Grid>, Option<Page>)>>>,
 }
 
+/// Abstand oben bis zum ersten Video (unter der schwebenden Navigation).
+const TOP_MARGIN: i32 = 56;
+
 impl Grid {
+    /// Fester Abstand über dem Raster (statt Platz für die Navigation), für Seiten mit eigenem Kopf.
+    /// Außerhalb des Scrollbereichs, sonst scrollt er mit weg und die Videos kleben am Kopf.
+    pub fn set_top_margin(&self, px: i32) {
+        if let Some(content) = self.top.parent() {
+            content.set_margin_top(0);
+        }
+        self.widget.set_margin_top(px);
+    }
+
     pub fn new(on_play: impl Fn(Video) + 'static, on_channel: impl Fn(String) + 'static) -> Rc<Self> {
         // ponytail: FlowBox baut alle Karten; bei mehreren hundert Videos auf GridView umstellen.
         let top = flowbox();
         let rest = flowbox();
         // Laden: nur ein Spinner. Die Labels zeigen nur Fehler oder „keine Ergebnisse“.
         let status = gtk::Label::builder().visible(false).margin_top(48).build();
-        let spinner = gtk::Spinner::builder().width_request(32).height_request(32).margin_top(48).visible(false).build();
+        let spinner = crate::icons::spinner(32).margin_top(48).visible(false).build();
         let footer = gtk::Label::builder().visible(false).margin_top(12).margin_bottom(24).css_classes(["dim-label"]).build();
-        let footer_spinner = gtk::Spinner::builder().margin_top(12).margin_bottom(24).visible(false).build();
+        let footer_spinner = crate::icons::spinner(16).margin_top(12).margin_bottom(24).visible(false).build();
 
         // „Weiterschauen“: Überschrift und eine waagerecht scrollbare Reihe.
         // Gleich breite Plätze, einer pro Rasterspalte (leere Plätze füllt `layout` auf): so sind die Karten
@@ -295,8 +342,8 @@ impl Grid {
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            // Platz für die schwebende Navigation oben links.
-            .margin_top(68)
+            // Platz für die schwebende Navigation oben links (12 Rand + 38 Bubble + 6).
+            .margin_top(TOP_MARGIN)
             .margin_start(16)
             .margin_end(16)
             .build();
@@ -517,9 +564,9 @@ impl Grid {
     where
         F: Future<Output = Result<Page, String>> + Send + 'static,
     {
-        let run: Rc<dyn Fn(&Rc<Grid>)> = Rc::new(move |g: &Rc<Grid>| g.run(make(), None));
+        let run: Rc<dyn Fn(&Rc<Grid>, Option<Page>)> = Rc::new(move |g: &Rc<Grid>, saved| g.run(make(), saved));
         self.last.replace(Some(run.clone()));
-        run(self);
+        run(self, None);
     }
 
     /// Wie `show`, zeigt aber `saved` (z. B. die letzte Startseite) sofort und tauscht sie gegen das
@@ -530,7 +577,7 @@ impl Grid {
     {
         let make = Rc::new(make);
         let again = make.clone();
-        self.last.replace(Some(Rc::new(move |g: &Rc<Grid>| g.run(again(), None))));
+        self.last.replace(Some(Rc::new(move |g: &Rc<Grid>, saved| g.run(again(), saved))));
         self.run(make(), saved);
     }
 
@@ -539,7 +586,10 @@ impl Grid {
         let last = self.last.borrow().clone();
         if let Some(run) = last {
             youtube::forget_cache();
-            run(self);
+            // Bisheriges bleibt stehen, bis das Neue da ist (Lade-Kreis in der Bubble).
+            let videos = self.videos.borrow().clone();
+            let current = (!videos.is_empty()).then(|| Page { videos, next: self.next.borrow().clone() });
+            run(self, current);
         }
     }
 
@@ -566,18 +616,18 @@ impl Grid {
             Some(p) => self.append(p),
             None => {
                 self.spinner.set_visible(true);
-                self.spinner.start();
             }
         }
 
         let grid = self.clone();
+        let busy = crate::Busy::new();
         glib::spawn_future_local(async move {
+            let _busy = busy;
             let res = bg(fut).await;
             if grid.generation.get() != generation {
                 return;
             }
             grid.loading.set(false);
-            grid.spinner.stop();
             grid.spinner.set_visible(false);
             match res {
                 Ok(p) if p.videos.is_empty() && !has_saved => grid.message("No results"),
@@ -619,17 +669,17 @@ impl Grid {
         self.loading.set(true);
         self.footer.set_visible(false);
         self.footer_spinner.set_visible(true);
-        self.footer_spinner.start();
 
         let generation = self.generation.get();
         let grid = self.clone();
+        let busy = crate::Busy::new();
         glib::spawn_future_local(async move {
+            let _busy = busy;
             let res = bg(youtube::more(m.clone())).await;
             if grid.generation.get() != generation {
                 return;
             }
             grid.loading.set(false);
-            grid.footer_spinner.stop();
             grid.footer_spinner.set_visible(false);
             match res {
                 Ok(p) => grid.append(p),
@@ -647,6 +697,15 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bars_found() {
+        // 360 hoch, oben 45 und unten 60 dunkle Zeilen.
+        assert_eq!(bars(360, |y| y < 45 || y >= 300), (46, 61));
+        assert_eq!(bars(360, |_| false), (0, 0));
+        // Ganz dunkles Bild: nichts abschneiden.
+        assert_eq!(bars(360, |_| true), (0, 0));
+    }
 
     #[test]
     fn formats() {
