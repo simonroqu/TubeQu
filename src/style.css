@@ -155,7 +155,13 @@ scale.timeline slider {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 
-/* Timeline: ohne Hintergrund, etwas dicker. */
+/* Timeline: ohne Hintergrund, etwas dicker. Ohne seitlichen Innenabstand des GTK-Themes (12 px),
+   damit sie links und rechts bündig mit den Bubbles darunter abschließt. */
+scale.timeline {
+  padding-left: 0;
+  padding-right: 0;
+}
+
 scale.timeline trough {
   min-height: 6px;
   border-radius: 3px;

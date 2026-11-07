@@ -158,4 +158,10 @@ impl SearchModal {
     pub fn close(&self) {
         self.widget.set_visible(false);
     }
+
+    /// Zurück zur Startseite: die letzte Suche steht beim nächsten Öffnen nicht mehr im Feld.
+    pub fn reset(&self) {
+        self.last.replace(String::new());
+        self.entry.set_text("");
+    }
 }

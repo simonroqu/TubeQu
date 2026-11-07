@@ -439,6 +439,11 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         let search = search.clone();
         move |_| search.open()
     });
+    // Home (auch der Endbildschirm-Knopf) verlässt die Suche: Feld beim nächsten Öffnen leer.
+    home.connect_clicked({
+        let search = search.clone();
+        move |_| search.reset()
+    });
 
     // Vollbild: Kopfzeile und Infos ausblenden, nur noch Video.
     player.controls.fullscreen.connect_clicked({
