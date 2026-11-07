@@ -30,7 +30,7 @@ const DEFAULT_QUALITY: u32 = 1080;
 pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// Datei in `~/.config/tubequ/` (Qualität, Lautstärke).
-fn config_file(name: &str) -> PathBuf {
+pub fn config_file(name: &str) -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));

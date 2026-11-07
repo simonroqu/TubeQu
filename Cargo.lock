@@ -2427,6 +2427,7 @@ dependencies = [
  "reqwest",
  "rustypipe",
  "serde_json",
+ "sha1",
  "sha2",
  "tokio",
 ]

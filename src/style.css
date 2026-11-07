@@ -27,26 +27,6 @@ button:checked:hover {
   background: alpha(currentColor, 0.1);
 }
 
-/* Tabs (Kanalseite): normale Knöpfe mit dezenter Fläche, der aktive heller. Kein Unterstrich. */
-.tabs > button {
-  padding: 4px 14px;
-  border-radius: var(--radius-s);
-  background: alpha(currentColor, 0.06);
-  box-shadow: none;
-  color: inherit;
-}
-
-.tabs > button:hover {
-  background: alpha(currentColor, 0.12);
-}
-
-.tabs > button:checked,
-.tabs > button:checked:hover {
-  background: alpha(currentColor, 0.2);
-  box-shadow: none;
-  color: inherit;
-}
-
 .avatar {
   border-radius: 9999px;
 }

@@ -41,17 +41,40 @@ const FULL_WIDTH_BELOW: i32 = 1600;
 const MINI_WIDTH: i32 = 400;
 const MINI_MARGIN: i32 = 16;
 
-/// Seitenrand des Players: so viel, dass er mittig `PLAYER_WIDTH` der Breite einnimmt, mindestens
-/// `PLAYER_MARGIN`. Im Vollbild kein Rand.
-fn player_side(width: i32, fullscreen: bool) -> i32 {
+/// Kleinste Player-Breite, die man mit Strg+Mausrad einstellen kann.
+const MIN_PLAYER_WIDTH: i32 = 640;
+/// So viele Pixel breiter/schmaler pro Mausrad-Raste.
+const ZOOM_STEP: f64 = 80.0;
+
+/// Seitenrand des Players. `want` = mit Strg+Mausrad gewählte Player-Breite: Sie bleibt fest, ein
+/// schmaleres Fenster nimmt nur den Rand weg; reicht das Fenster nicht, randlos über die ganze Breite.
+/// Ohne Wahl: mittig `PLAYER_WIDTH` der Breite, unter `FULL_WIDTH_BELOW` volle Breite. Im Vollbild kein Rand.
+fn player_side(width: i32, fullscreen: bool, want: Option<i32>) -> i32 {
     if fullscreen {
         return 0;
     }
-    // Schmales Fenster: volle Breite (nur der kleine Rand).
-    if width < FULL_WIDTH_BELOW {
-        return PLAYER_MARGIN;
+    match want {
+        Some(p) if p >= width => 0,
+        Some(p) => PLAYER_MARGIN.max((width - p) / 2),
+        // Schmales Fenster: volle Breite (nur der kleine Rand).
+        None if width < FULL_WIDTH_BELOW => PLAYER_MARGIN,
+        None => PLAYER_MARGIN.max((width as f64 * (1.0 - PLAYER_WIDTH) / 2.0).round() as i32),
     }
-    PLAYER_MARGIN.max((width as f64 * (1.0 - PLAYER_WIDTH) / 2.0).round() as i32)
+}
+
+/// Neue Wunschbreite nach `dy` Mausrad-Rasten (hoch = negativ = breiter). Ab Fensterbreite = randlos.
+fn zoom(current: i32, dy: f64, window: i32) -> i32 {
+    ((current as f64 - dy * ZOOM_STEP).round() as i32).clamp(MIN_PLAYER_WIDTH, window.max(MIN_PLAYER_WIDTH))
+}
+
+fn saved_width() -> Option<i32> {
+    std::fs::read_to_string(crate::controls::config_file("player-width")).ok()?.trim().parse().ok()
+}
+
+fn save_width(w: i32) {
+    let f = crate::controls::config_file("player-width");
+    let _ = std::fs::create_dir_all(f.parent().unwrap());
+    let _ = std::fs::write(f, w.to_string());
 }
 
 pub struct WatchPage {
@@ -75,6 +98,8 @@ pub struct WatchPage {
     size: Cell<(i32, i32)>,
     aspect: Cell<f64>,
     fullscreen: Cell<bool>,
+    /// Mit Strg+Mausrad gewählte Player-Breite (bleibt über Neustarts erhalten).
+    want: Cell<Option<i32>>,
     /// Miniplayer: nur das Video, klein unten rechts über der aktuellen Seite.
     mini: Cell<bool>,
     /// ID des angezeigten Videos und seines Kanals; verspätete Antworten anderer Videos werden verworfen.
@@ -169,6 +194,7 @@ impl WatchPage {
             size: Cell::new((0, 0)),
             aspect: Cell::new(16.0 / 9.0),
             fullscreen: Cell::new(false),
+            want: Cell::new(saved_width()),
             mini: Cell::new(false),
             current: RefCell::default(),
             channel_id: RefCell::default(),
@@ -184,6 +210,27 @@ impl WatchPage {
                 }
             }
         });
+        // Strg+Mausrad: Player-Breite einstellen (vor dem Scrollen der Seite).
+        let zoom_ctl = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        zoom_ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
+        zoom_ctl.connect_scroll({
+            let page = Rc::downgrade(&page);
+            move |c, _, dy| {
+                let Some(p) = page.upgrade() else { return glib::Propagation::Proceed };
+                if !c.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) || p.mini.get() || p.fullscreen.get() {
+                    return glib::Propagation::Proceed;
+                }
+                let w = p.size.get().0;
+                // Touchpad liefert Pixel statt Rasten.
+                let dy = if c.unit() == gdk::ScrollUnit::Wheel { dy } else { dy / ZOOM_STEP };
+                let new = zoom(w - 2 * player_side(w, false, p.want.get()), dy, w);
+                p.want.set(Some(new));
+                save_width(new);
+                p.fit_player();
+                glib::Propagation::Stop
+            }
+        });
+        page.widget.add_controller(zoom_ctl);
         page.channel.connect_clicked({
             let page = Rc::downgrade(&page);
             move |_| {
@@ -222,17 +269,19 @@ impl WatchPage {
         self.widget.set_size_request(-1, -1);
         let (w, h) = self.size.get();
         let fs = self.fullscreen.get();
-        let m = if fs { 0 } else { PLAYER_MARGIN };
-        let side = player_side(w, fs);
+        let side = player_side(w, fs, self.want.get());
+        // Randlos (Vollbild oder ganz breit gezoomt): auch oben/unten kein Rand, eckig.
+        let edge = side == 0;
+        let m = if edge { 0 } else { PLAYER_MARGIN };
         self.player.set_margin_top(m);
         self.player.set_margin_bottom(m);
         self.player.set_margin_start(side);
         self.player.set_margin_end(side);
         // Text darunter bündig zum Player, wie bisher 16 px eingerückt (bzw. 11 px mehr als der Player).
-        self.info.set_margin_start(side - PLAYER_MARGIN + 16);
-        self.info.set_margin_end(side - PLAYER_MARGIN + 16);
+        self.info.set_margin_start(side.max(PLAYER_MARGIN) - PLAYER_MARGIN + 16);
+        self.info.set_margin_end(side.max(PLAYER_MARGIN) - PLAYER_MARGIN + 16);
         // Abgerundete Ecken wie die Fensterecken (`--radius-window`), im Vollbild eckig.
-        if fs { self.player.remove_css_class("rounded") } else { self.player.add_css_class("rounded") }
+        if edge { self.player.remove_css_class("rounded") } else { self.player.add_css_class("rounded") }
         if w > 0 && h > 0 {
             self.player.set_size_request(-1, player_height(w - 2 * side, h - 2 * m, self.aspect.get(), fs));
         }
@@ -422,8 +471,20 @@ mod tests {
         assert_eq!(player_height(1280, 1400, 9.0 / 16.0, false), 1400);
         assert_eq!(player_height(1280, 1400, 16.0 / 9.0, true), 1400);
         // Seitenrand: unter 1600 px volle Breite (5 px), sonst 85 % mittig, Vollbild = 0.
-        assert_eq!(player_side(1343, false), 5);
-        assert_eq!(player_side(2560, false), 192);
-        assert_eq!(player_side(2560, true), 0);
+        assert_eq!(player_side(1343, false, None), 5);
+        assert_eq!(player_side(2560, false, None), 192);
+        assert_eq!(player_side(2560, true, None), 0);
+        // Gewählte Breite bleibt, schmaleres Fenster nimmt den Rand weg, zu schmal = randlos.
+        assert_eq!(player_side(2560, false, Some(1600)), 480);
+        assert_eq!(player_side(1800, false, Some(1600)), 100);
+        assert_eq!(player_side(1500, false, Some(1600)), 0);
+    }
+
+    #[test]
+    fn zoom_steps_and_limits() {
+        assert_eq!(zoom(1600, -1.0, 2560), 1680);
+        assert_eq!(zoom(1600, 1.0, 2560), 1520);
+        assert_eq!(zoom(2500, -3.0, 2560), 2560);
+        assert_eq!(zoom(700, 5.0, 2560), MIN_PLAYER_WIDTH);
     }
 }

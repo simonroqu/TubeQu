@@ -13,6 +13,7 @@ libmpv2-sys = "4"
 reqwest = "0.12"
 rustypipe = "0.11"
 serde_json = "1"
+sha1 = "0.10"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "fs", "process"] }
 

@@ -88,6 +88,24 @@ fn save(mpv: &Mpv, track: &RefCell<Track>) {
     }
 }
 
+/// Position an YouTube melden (Pause, Videowechsel, Stopp) – nicht alle 5 s wie das lokale Speichern.
+/// `wait`: blockiert bis zu 3 s, damit die Meldung beim Schließen der App noch rausgeht.
+fn report(mpv: &Mpv, track: &RefCell<Track>, wait: bool) {
+    let t = track.borrow();
+    let Some(id) = t.video.as_ref().filter(|_| !t.live).map(|v| v.id.clone()) else { return };
+    let Ok(pos) = mpv.get_property::<f64>("time-pos") else { return };
+    let fut = async move {
+        if let Err(e) = crate::youtube::report_position(id, pos).await {
+            eprintln!("Position an YouTube melden fehlgeschlagen: {e}");
+        }
+    };
+    if wait {
+        let _ = crate::RT.block_on(tokio::time::timeout(Duration::from_secs(3), fut));
+    } else {
+        crate::RT.spawn(fut);
+    }
+}
+
 /// Zeigt eine Meldung über dem Video (rot, wenn `error`); `retry` = darunter Reload-Icon anbieten.
 fn show(msg: &gtk::Label, retry: &gtk::Button, text: &str, error: bool) {
     msg.set_text(text);
@@ -466,8 +484,12 @@ impl Player {
                                     f(dw as f64 / dh as f64);
                                 }
                                 let due = track.borrow().last_save.is_none_or(|t| t.elapsed() >= SAVE_EVERY);
-                                if (name == "time-pos" && due) || (name == "pause" && matches!(change, PropertyData::Flag(true))) {
+                                let paused = name == "pause" && matches!(change, PropertyData::Flag(true));
+                                if (name == "time-pos" && due) || paused {
                                     save(mpv, &track);
+                                }
+                                if paused {
+                                    report(mpv, &track, false);
                                 }
                                 // SponsorBlock: in einem markierten Abschnitt ans Ende springen.
                                 if let (true, PropertyData::Double(pos)) = (name == "time-pos", &change) {
@@ -598,6 +620,7 @@ impl Player {
     /// Video abspielen; ist es bekannt, wird dort fortgesetzt, wo man aufgehört hat.
     pub fn play(&self, video: Option<crate::youtube::Video>, url: &str, live: bool) {
         save(self.mpv, &self.track); // vorheriges Video sichern
+        report(self.mpv, &self.track, false);
         let start = video.as_ref().filter(|_| !live).and_then(|v| progress::resume_at(&v.id));
         // SponsorBlock-Abschnitte im Hintergrund holen (fragt sponsor.ajay.app, nicht YouTube).
         if let Some(id) = video.as_ref().filter(|_| !live).map(|v| v.id.clone()) {
@@ -640,6 +663,8 @@ impl Player {
     /// Wiedergabe beenden (Miniplayer schließen, App schließen). Speichert vorher die Position.
     pub fn stop(&self) {
         save(self.mpv, &self.track);
+        // ponytail: wartet auch beim Schließen des Miniplayers (kurz); nur beim App-Ende wäre es nötig.
+        report(self.mpv, &self.track, true);
         self.track.replace(Track::default());
         self.pending.take();
         let _ = self.mpv.command("stop", &[]);

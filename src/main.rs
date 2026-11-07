@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::LazyLock;
 use youtube::Video;
 
-static RT: LazyLock<tokio::runtime::Runtime> =
+pub static RT: LazyLock<tokio::runtime::Runtime> =
     LazyLock::new(|| tokio::runtime::Runtime::new().expect("tokio"));
 
 /// Führt `fut` im Hintergrund (tokio) aus; das Ergebnis kommt im GTK-Thread an.
@@ -70,6 +70,8 @@ struct Nav {
     window: gtk::ApplicationWindow,
     player: Rc<player::Player>,
     history: RefCell<Vec<String>>,
+    /// Seiten, von denen man mit „Zurück“ gekommen ist (Maustaste 5 = vor). Neue Wege leeren sie.
+    forward: RefCell<Vec<String>>,
     /// Schwebende Knöpfe oben links. Auf Übersicht/Kanal immer sichtbar über der Seite;
     /// beim Video sitzen sie im Player und blenden sich mit dessen Leiste aus und ein.
     nav_bar: gtk::Revealer,
@@ -146,6 +148,7 @@ impl Nav {
         let cur = self.current();
         if cur != page {
             self.history.borrow_mut().push(cur);
+            self.forward.borrow_mut().clear();
         }
         self.show(page);
     }
@@ -153,12 +156,24 @@ impl Nav {
     fn back(&self) {
         let prev = self.history.borrow_mut().pop();
         if let Some(p) = prev {
+            self.forward.borrow_mut().push(self.current());
+            self.show(&p);
+        }
+    }
+
+    /// Gegenstück zu `back`. ponytail: merkt nur die Seite, nicht ihren Inhalt – die Seiten gibt es je
+    /// einmal und sie zeigen noch, was zuletzt drin war (Kanal, Video).
+    fn forward(&self) {
+        let next = self.forward.borrow_mut().pop();
+        if let Some(p) = next {
+            self.history.borrow_mut().push(self.current());
             self.show(&p);
         }
     }
 
     fn home(&self) {
         self.history.borrow_mut().clear();
+        self.forward.borrow_mut().clear();
         self.show("browse");
     }
 }
@@ -175,6 +190,21 @@ fn video_id(url: &str) -> Option<String> {
 fn tiling_wm() -> bool {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
     ["hyprland", "sway", "niri", "river", "i3"].iter().any(|wm| desktop.contains(wm))
+}
+
+/// Profilbild (über `youtube::avatar`, auf der Platte zwischengespeichert) und Tooltip eines Kontos.
+fn show_account(pic: &gtk::Image, button: &gtk::Button, a: &youtube::Account) {
+    button.set_tooltip_text(Some(&format!("{}\n{}", a.name, a.email)));
+    pic.set_icon_name(Some("tubequ-account-symbolic"));
+    let Some(url) = a.photo.clone() else { return };
+    let pic = pic.downgrade();
+    glib::spawn_future_local(async move {
+        let Ok(bytes) = bg(youtube::avatar(url)).await else { return };
+        let Ok(tex) = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) else { return };
+        if let Some(pic) = pic.upgrade() {
+            pic.set_paintable(Some(&tex));
+        }
+    });
 }
 
 fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
@@ -210,8 +240,29 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     BUSY_ICON.with(|i| i.set(busy_icon.clone()).ok());
     top.append(&busy_icon);
     let extra = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).halign(gtk::Align::Start).build();
-    extra.append(&later_button);
-    extra.append(&history_button);
+    // Links bündig: sonst wachsen die Knöpfe mit, wenn die Kontoliste die Spalte breiter macht.
+    for b in [&later_button, &history_button] {
+        b.set_halign(gtk::Align::Start);
+        extra.append(b);
+    }
+    // Konto (nur mit Browser-Login): Profilbild des aktiven Kontos unten in der Spalte. Klick klappt
+    // daneben die übrigen Konten nach rechts auf (Bubble wird zum liegenden U).
+    let account_pic = gtk::Image::builder()
+        .icon_name("tubequ-account-symbolic")
+        .pixel_size(22)
+        // Genau so groß wie das Bild, sonst schneidet die Rundung nur die Ecken eines größeren Felds.
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .overflow(gtk::Overflow::Hidden)
+        .css_classes(["avatar"])
+        .build();
+    let account_button = gtk::Button::builder().child(&account_pic).tooltip_text("Account").focusable(false).css_classes(["flat"]).build();
+    let other_accounts = gtk::Box::builder().spacing(2).margin_start(2).build();
+    let accounts_menu = gtk::Revealer::builder().child(&other_accounts).transition_type(gtk::RevealerTransitionType::SlideRight).build();
+    let account_row = gtk::Box::builder().halign(gtk::Align::Start).visible(youtube::COOKIES.is_some()).build();
+    account_row.append(&account_button);
+    account_row.append(&accounts_menu);
+    extra.append(&account_row);
     // Links ausgerichtet: nav_shape.rs misst an der Revealer-Breite, wie breit die Spalte ist.
     let menu = gtk::Revealer::builder().child(&extra).halign(gtk::Align::Start).transition_type(gtk::RevealerTransitionType::SlideDown).build();
     extra.set_margin_top(2);
@@ -219,9 +270,17 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     nav_box.set_css_classes(&["bubble", "nav-shape"]);
     nav_box.append(&top);
     nav_box.append(&menu);
+    nav_box.set_parts(&later_button, &account_row);
+    // Oben nur so breit wie die Knöpfe: sonst zieht eine breite Kontoliste die obere Reihe mit.
+    top.set_halign(gtk::Align::Start);
     let set_menu: Rc<dyn Fn(bool)> = Rc::new({
-        let menu = menu.clone();
-        move |open| menu.set_reveal_child(open)
+        let (menu, accounts_menu) = (menu.clone(), accounts_menu.clone());
+        move |open| {
+            menu.set_reveal_child(open);
+            if !open {
+                accounts_menu.set_reveal_child(false);
+            }
+        }
     });
     menu_button.connect_clicked({
         let (menu, set_menu) = (menu.clone(), set_menu.clone());
@@ -362,6 +421,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         window: window.clone(),
         player: player.clone(),
         history: RefCell::default(),
+        forward: RefCell::default(),
         nav_bar: nav_bar.clone(),
         page_layer: page_layer.clone(),
         in_player: std::cell::Cell::new(false),
@@ -466,6 +526,23 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         let nav = nav.clone();
         move |_| nav.back()
     });
+    // Seitentasten der Maus (GTK: 8 = zurück, 9 = vor), überall im Fenster, auch über dem Player.
+    let side_buttons = gtk::GestureClick::builder().button(0).propagation_phase(gtk::PropagationPhase::Capture).build();
+    side_buttons.connect_pressed({
+        let nav = nav.clone();
+        move |g, _, _, _| match g.current_button() {
+            8 => {
+                g.set_state(gtk::EventSequenceState::Claimed);
+                nav.back();
+            }
+            9 => {
+                g.set_state(gtk::EventSequenceState::Claimed);
+                nav.forward();
+            }
+            _ => {}
+        }
+    });
+    window.add_controller(side_buttons);
 
     // Welche Liste das Raster zeigt ("home", "later", "history", sonst ""). Klick auf den Knopf der
     // Seite, auf der man schon ist, lädt sie neu (gilt für jeden Seiten-Knopf in der Bubble).
@@ -509,6 +586,80 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
             grid.show(|| async { Ok(youtube::Page { videos: lists::later(), next: None }) });
         })
     }));
+
+    // Aktives Konto beim Start: aus ~/.cache/tubequ/accounts.tsv, nur beim allerersten Mal eine Anfrage.
+    if youtube::COOKIES.is_some() {
+        let (pic, button) = (account_pic.downgrade(), account_button.downgrade());
+        glib::spawn_future_local(async move {
+            if let Ok(a) = bg(youtube::current_account()).await
+                && let (Some(pic), Some(button)) = (pic.upgrade(), button.upgrade())
+            {
+                show_account(&pic, &button, &a);
+            }
+        });
+    }
+    // Klick aufs Profilbild: übrige Konten nach rechts aufklappen (erst dann geladen, einmal pro Sitzung).
+    account_button.connect_clicked({
+        let (accounts_menu, other_accounts, account_pic, home, set_menu) =
+            (accounts_menu.clone(), other_accounts.clone(), account_pic.clone(), home.clone(), set_menu.clone());
+        move |account_button| {
+            let open = !accounts_menu.reveals_child();
+            accounts_menu.set_reveal_child(open);
+            if !open {
+                return;
+            }
+            while let Some(c) = other_accounts.first_child() {
+                other_accounts.remove(&c);
+            }
+            other_accounts.append(&icons::spinner(16).margin_start(6).margin_end(6).build());
+            let (other_accounts, account_pic, account_button, home, set_menu) =
+                (other_accounts.downgrade(), account_pic.downgrade(), account_button.downgrade(), home.downgrade(), set_menu.clone());
+            glib::spawn_future_local(async move {
+                let _busy = Busy::new();
+                let res = bg(youtube::accounts()).await;
+                let Some(list) = other_accounts.upgrade() else { return };
+                while let Some(c) = list.first_child() {
+                    list.remove(&c);
+                }
+                let accounts = match res {
+                    Ok(a) => a,
+                    Err(e) => {
+                        list.append(&gtk::Label::new(Some(&e)));
+                        return;
+                    }
+                };
+                let others: Vec<_> = accounts.iter().filter(|a| a.index != youtube::account()).cloned().collect();
+                if others.is_empty() {
+                    list.append(&gtk::Label::new(Some("No other accounts")));
+                }
+                for a in others {
+                    let pic = gtk::Image::builder()
+                        .icon_name("tubequ-account-symbolic")
+                        .pixel_size(22)
+                        // Genau so groß wie das Bild, sonst schneidet die Rundung nur die Ecken eines größeren Felds.
+                        .halign(gtk::Align::Center)
+                        .valign(gtk::Align::Center)
+                        .overflow(gtk::Overflow::Hidden)
+                        .css_classes(["avatar"])
+                        .build();
+                    let b = gtk::Button::builder().child(&pic).focusable(false).css_classes(["flat"]).build();
+                    show_account(&pic, &b, &a);
+                    let (account_pic, account_button, home, set_menu) = (account_pic.clone(), account_button.clone(), home.clone(), set_menu.clone());
+                    b.connect_clicked(move |_| {
+                        youtube::set_account(a.index);
+                        if let (Some(pic), Some(button)) = (account_pic.upgrade(), account_button.upgrade()) {
+                            show_account(&pic, &button, &a);
+                        }
+                        set_menu(false);
+                        if let Some(home) = home.upgrade() {
+                            home.emit_clicked();
+                        }
+                    });
+                    list.append(&b);
+                }
+            });
+        }
+    });
 
     // Schwebendes Suchfenster über allem.
     let search = search::SearchModal::new({

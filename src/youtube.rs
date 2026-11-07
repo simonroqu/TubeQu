@@ -3,9 +3,10 @@
 use rustypipe::client::RustyPipe;
 use rustypipe::model::VideoItem;
 use rustypipe::model::paginator::Paginator;
-use rustypipe::param::{ChannelVideoTab, Language};
+use rustypipe::param::Language;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
@@ -416,7 +417,7 @@ fn plain_description_markup(text: &str) -> String {
 /// Kanal-Logo (URL) über die Kanal-Anfrage; die ist danach zwischengespeichert, ein Klick auf den
 /// Kanal kostet dann keine weitere Anfrage.
 pub async fn channel_avatar(id: String) -> Option<String> {
-    channel(id, false).await.ok()?.0.avatar
+    channel(id).await.ok()?.0.avatar
 }
 
 pub async fn details(id: String) -> Result<Details, String> {
@@ -446,20 +447,86 @@ pub async fn details(id: String) -> Result<Details, String> {
     Ok(details)
 }
 
-/// Video in deinem YouTube-Verlauf als gesehen eintragen (nur mit Browser-Login),
-/// damit YouTube deine Empfehlungen weiter verbessert. Abgespielt wird ohne Login:
-/// mit Cookies liefert YouTube Stream-Adressen, die sich nicht öffnen lassen.
+/// Video in deinem YouTube-Verlauf eintragen (nur mit Browser-Login), damit YouTube deine
+/// Empfehlungen weiter verbessert. Abgespielt wird ohne Login: mit Cookies liefert YouTube
+/// Stream-Adressen, die sich nicht öffnen lassen. Eine `player`-Anfrage über `throttle()` liefert die
+/// Tracking-Adressen; die Playback-Meldung trägt ins Verlauf ein, die echte Position kommt später über
+/// `report_position` (nicht wie `yt-dlp --mark-watched`, das immer „bis zum Ende geschaut“ meldet).
 pub async fn mark_watched(id: String) -> Result<(), String> {
-    let Some(cookies) = COOKIES.clone() else { return Ok(()) };
-    throttle().await?;
-    let out = tokio::process::Command::new("yt-dlp")
-        .args(["--cookies-from-browser", &cookies, "--mark-watched", "--skip-download"])
-        .args(["--ignore-no-formats-error", "--quiet", "--no-warnings"])
-        .arg(format!("https://www.youtube.com/watch?v={id}"))
-        .output()
+    if COOKIES.is_none() {
+        return Ok(());
+    }
+    let cookies = browser_cookies().await?;
+    let account = account();
+    let body = serde_json::json!({ "context": innertube_context(), "videoId": id });
+    let text = innertube(&cookies, account, "player", &body).await?;
+    let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let url = |k: &str| j["playbackTracking"][k]["baseUrl"].as_str().map(String::from);
+    let (Some(playback), Some(watchtime)) = (url("videostatsPlaybackUrl"), url("videostatsWatchtimeUrl")) else {
+        return Err("No tracking addresses in the player response".into());
+    };
+    // ponytail: Dummy-cpn statt des Algorithmus aus base.js – laut yt-dlp reicht das.
+    let cpn: String = format!("{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos())
+        .chars()
+        .rev()
+        .take(16)
+        .collect();
+    let t = Tracking { id, cookies, account, watchtime, cpn };
+    stats_ping(&t, &stats_url(&playback, &t.cpn, 0.0, false)).await?;
+    *TRACKING.lock().unwrap() = Some(t);
+    Ok(())
+}
+
+/// Tracking-Daten des zuletzt eingetragenen Videos, für `report_position`.
+#[derive(Clone)]
+struct Tracking {
+    id: String,
+    cookies: Vec<(String, String)>,
+    account: u32,
+    watchtime: String,
+    cpn: String,
+}
+
+static TRACKING: StdMutex<Option<Tracking>> = StdMutex::new(None);
+
+/// Wie weit du das Video geschaut hast, an YouTube melden (Fortschrittsbalken dort, Weiterschauen am TV).
+/// Keine `player`-Anfrage, nur eine Meldung an `s.youtube.com` (geht darum nicht über `throttle()`).
+/// Tut nichts, wenn das Video nicht (oder noch nicht) über `mark_watched` eingetragen wurde.
+pub async fn report_position(id: String, pos: f64) -> Result<(), String> {
+    let Some(t) = TRACKING.lock().unwrap().clone().filter(|t| t.id == id) else { return Ok(()) };
+    stats_ping(&t, &stats_url(&t.watchtime, &t.cpn, pos, true)).await
+}
+
+/// Tracking-Adresse mit Position `pos` (Sekunden). `watchtime`: zusätzlich der geschaute Abschnitt 0…pos.
+fn stats_url(base: &str, cpn: &str, pos: f64, watchtime: bool) -> String {
+    let Ok(mut url) = reqwest::Url::parse(base) else { return base.to_string() };
+    let keep: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| !matches!(k.as_ref(), "ver" | "cpn" | "cmt" | "el" | "st" | "et"))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let pos = format!("{pos:.3}");
+    let mut q = url.query_pairs_mut();
+    q.clear().extend_pairs(keep).extend_pairs([("ver", "2"), ("cpn", cpn), ("cmt", &pos), ("el", "detailpage")]);
+    if watchtime {
+        q.extend_pairs([("st", "0"), ("et", &pos)]);
+    }
+    drop(q);
+    url.into()
+}
+
+async fn stats_ping(t: &Tracking, url: &str) -> Result<(), String> {
+    let cookie = t.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
+    let res = HTTP
+        .get(url)
+        .header("Cookie", cookie)
+        .header("X-Goog-AuthUser", t.account.to_string())
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0")
+        .timeout(Duration::from_secs(5))
+        .send()
         .await
-        .map_err(|e| format!("Couldn't run yt-dlp: {e}"))?;
-    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+        .map_err(|e| format!("Couldn't reach YouTube: {e}"))?;
+    if res.status().is_success() { Ok(()) } else { Err(format!("YouTube refused ({})", res.status())) }
 }
 
 /// Ein Eintrag aus `yt-dlp -j --flat-playlist`.
@@ -542,16 +609,20 @@ pub fn saved_home() -> Option<Page> {
 /// yt-dlp blättert für Seite k intern ab Anfang (k Abrufe in einem Aufruf): darum zählen sie als k Anfragen.
 /// ponytail: tiefes Nachladen wird dadurch langsamer (2 s je Seite); eigene Fortsetzungs-Token, falls das stört.
 async fn ytdlp_page(target: String, start: usize) -> Result<Page, String> {
-    let key = format!("ytdlp:{target}:{start}");
+    let key = format!("ytdlp:{}:{target}:{start}", account());
     if let Some(p) = cached(&key) {
         return Ok(p);
     }
-    let cookies = COOKIES.clone().ok_or("No browser login found")?;
     for _ in 0..=start / HOME_BATCH {
         throttle().await?;
     }
-    let out = tokio::process::Command::new("yt-dlp")
-        .args(["--cookies-from-browser", &cookies, "--flat-playlist", "-j"])
+    let mut cmd = tokio::process::Command::new("yt-dlp");
+    // Kanäle gehen auch ohne Login; Startseite und Suche rufen das hier nur mit Login auf.
+    if let Some(cookies) = COOKIES.as_deref() {
+        cmd.args(["--cookies-from-browser", cookies, "--add-header", &account_header()]);
+    }
+    let out = cmd
+        .args(["--flat-playlist", "-j"])
         .args(["--playlist-start", &(start + 1).to_string(), "--playlist-end", &(start + HOME_BATCH).to_string()])
         // Ungefähres Datum („3 days ago“) aus dem Text der Liste, ohne zusätzliche Anfrage.
         .args(["--extractor-args", "youtubetab:approximate_date"])
@@ -617,12 +688,15 @@ pub struct ChannelInfo {
     pub id: String,
     pub name: String,
     pub avatar: Option<String>,
-    pub has_live: bool,
+    pub subscribers: Option<u64>,
 }
 
-/// Kanal-Infos plus erste Seite des Tabs (`live` = Livestreams statt Videos).
-pub async fn channel(id: String, live: bool) -> Result<(ChannelInfo, Page), String> {
-    let key = format!("channel:{id}:{live}");
+/// Kanal-Infos plus erste Seite der Videos. Über yt-dlp statt rustypipe: rustypipe liefert bei
+/// Kanal-Videos seit einer YouTube-Änderung weder Datum noch Aufrufe noch Dauer. yt-dlp hat
+/// Aufrufe, Dauer und (mit `approximate_date`) das ungefähre Datum. Eine Anfrage, weitere Seiten
+/// wie bei der Startseite über `ytdlp_page`. Mit Browser-Login über das gewählte Konto.
+pub async fn channel(id: String) -> Result<(ChannelInfo, Page), String> {
+    let key = format!("channel:{id}");
     static CHANNELS: LazyLock<StdMutex<HashMap<String, ChannelInfo>>> = LazyLock::new(Default::default);
     if let Some(p) = cached(&key)
         && let Some(info) = CHANNELS.lock().unwrap().get(&id).cloned()
@@ -630,25 +704,307 @@ pub async fn channel(id: String, live: bool) -> Result<(ChannelInfo, Page), Stri
         return Ok((info, p));
     }
     throttle().await?;
-    let tab = if live { ChannelVideoTab::Live } else { ChannelVideoTab::Videos };
-    let c = RP.query().channel_videos_tab(&id, tab).await.map_err(|e| e.to_string())?;
-    // Avatar in mittlerer Größe; URLs kommen teils ohne Schema ("//yt3…").
-    let avatar = c.avatar.iter().find(|t| t.width >= 88).or(c.avatar.last()).map(|t| {
-        if t.url.starts_with("//") { format!("https:{}", t.url) } else { t.url.clone() }
-    });
-    // ponytail: subscriber_count liefert rustypipe 0.11.4 falsch (Lofi Girl: 481), daher weggelassen.
-    let info = ChannelInfo { id: c.id, name: c.name, avatar, has_live: c.has_live };
-    let mut page = Page::from(c.content);
+    let url = format!("https://www.youtube.com/channel/{id}/videos");
+    let mut cmd = tokio::process::Command::new("yt-dlp");
+    if let Some(cookies) = COOKIES.as_deref() {
+        cmd.args(["--cookies-from-browser", cookies, "--add-header", &account_header()]);
+    }
+    let out = cmd
+        .args(["-J", "--flat-playlist", "--playlist-end", &HOME_BATCH.to_string()])
+        .args(["--extractor-args", "youtubetab:approximate_date"])
+        .arg("--")
+        .arg(&url)
+        .output()
+        .await
+        .map_err(|e| format!("Couldn't run yt-dlp: {e}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|_| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        err.lines().rfind(|l| l.contains("ERROR")).unwrap_or("yt-dlp failed").to_string()
+    })?;
+    let (info, mut page) = channel_from_json(&json, &id, url);
     // Auf der Kanalseite fehlt der Kanal an den einzelnen Videos.
     for v in &mut page.videos {
         if v.channel.is_empty() {
             v.channel = info.name.clone();
-            v.channel_id = Some(info.id.clone());
         }
+        v.channel_id.get_or_insert_with(|| info.id.clone());
     }
     CHANNELS.lock().unwrap().insert(id, info.clone());
     store(key, &page);
     Ok((info, page))
+}
+
+/// Kanal-Infos und erste Seite aus `yt-dlp -J --flat-playlist`. `url` = Kanal-Tab fürs Nachladen.
+fn channel_from_json(j: &serde_json::Value, id: &str, url: String) -> (ChannelInfo, Page) {
+    let s = |k: &str| j.get(k).and_then(|v| v.as_str()).map(String::from);
+    // Avatar: unbeschnittenes Bild (`=s0`, volle Größe) auf 176 px verkleinert anfordern.
+    let avatar = j["thumbnails"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["id"] == "avatar_uncropped"))
+        .and_then(|t| t["url"].as_str())
+        .map(|u| https(&u.replace("=s0", "=s176")));
+    let entries = j["entries"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let info = ChannelInfo {
+        id: s("channel_id").unwrap_or_else(|| id.to_string()),
+        name: s("channel").or_else(|| s("uploader")).unwrap_or_default(),
+        avatar,
+        subscribers: j["channel_follower_count"].as_u64(),
+    };
+    // Weiter, solange yt-dlp eine volle Seite geliefert hat (gefilterte Einträge zählen mit).
+    let next = (entries.len() >= HOME_BATCH).then(|| More::YtDlp(url, HOME_BATCH));
+    (info, Page { videos: entries.iter().filter_map(video_from_json).collect(), next })
+}
+
+// ---------- Konto und Abonnieren ----------
+
+/// Welches der im Browser angemeldeten Google-Konten die App nutzt (0 = zuerst angemeldetes).
+/// Gilt für alles mit Login: Startseite, Suche, als gesehen melden, Abonnieren.
+static ACCOUNT: LazyLock<AtomicU32> = LazyLock::new(|| {
+    AtomicU32::new(std::fs::read_to_string(account_file()).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0))
+});
+
+fn account_file() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/tubequ/account")
+}
+
+pub fn account() -> u32 {
+    ACCOUNT.load(Ordering::Relaxed)
+}
+
+/// Konto wechseln und merken. Zwischengespeicherte Listen gehörten zum alten Konto.
+pub fn set_account(n: u32) {
+    ACCOUNT.store(n, Ordering::Relaxed);
+    let file = account_file();
+    let _ = std::fs::create_dir_all(file.parent().unwrap());
+    let _ = std::fs::write(file, n.to_string());
+    forget_cache();
+}
+
+/// Für yt-dlp: YouTube liefert mit diesem Header die Seite des gewählten Kontos, yt-dlp übernimmt
+/// daraus `SESSION_INDEX` für alle weiteren Anfragen (getestet 2026-11-07).
+fn account_header() -> String {
+    format!("X-Goog-AuthUser:{}", account())
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Account {
+    pub index: u32,
+    pub name: String,
+    pub email: String,
+    /// Profilbild (yt3.ggpht.com, über `avatar` geladen und auf der Platte zwischengespeichert).
+    pub photo: Option<String>,
+}
+
+/// Bekannte Konten in `~/.cache/tubequ/accounts.tsv` (Nummer, Name, E-Mail, Bild), damit das
+/// Bild des aktiven Kontos beim Start ohne Anfrage da ist.
+fn accounts_file() -> PathBuf {
+    cache_dir().join("accounts.tsv")
+}
+
+fn parse_accounts(text: &str) -> Vec<Account> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            Some(Account {
+                index: f.first()?.parse().ok()?,
+                name: f.get(1)?.to_string(),
+                email: f.get(2)?.to_string(),
+                photo: f.get(3).filter(|p| !p.is_empty()).map(|p| p.to_string()),
+            })
+        })
+        .collect()
+}
+
+fn saved_accounts() -> Vec<Account> {
+    parse_accounts(&std::fs::read_to_string(accounts_file()).unwrap_or_default())
+}
+
+/// Konten in die Datei übernehmen (gleiche Nummer = ersetzt).
+fn save_accounts(new: &[Account]) {
+    let mut all = saved_accounts();
+    all.retain(|a| !new.iter().any(|n| n.index == a.index));
+    all.extend_from_slice(new);
+    all.sort_by_key(|a| a.index);
+    let text: String = all
+        .iter()
+        .map(|a| format!("{}\t{}\t{}\t{}\n", a.index, a.name.replace('\t', " "), a.email, a.photo.as_deref().unwrap_or("")))
+        .collect();
+    let _ = std::fs::write(accounts_file(), text);
+}
+
+/// Das aktive Konto: aus der Datei, sonst einmalig eine Anfrage (danach gespeichert).
+pub async fn current_account() -> Result<Account, String> {
+    let n = account();
+    if let Some(a) = saved_accounts().into_iter().find(|a| a.index == n) {
+        return Ok(a);
+    }
+    let cookies = browser_cookies().await?;
+    let a = fetch_account(&cookies, n).await?.ok_or("No account found")?;
+    save_accounts(std::slice::from_ref(&a));
+    Ok(a)
+}
+
+/// Alle im Browser angemeldeten Konten. YouTube nennt pro Anfrage nur das Konto der mitgeschickten
+/// Nummer: also 0, 1, 2 … abfragen, bis eine Nummer fehlschlägt oder ein Konto doppelt kommt.
+/// Eine Anfrage pro Konto (+1), höchstens einmal pro Sitzung (erst wenn man die Liste aufklappt).
+pub async fn accounts() -> Result<Vec<Account>, String> {
+    static LIST: Mutex<Vec<Account>> = Mutex::const_new(Vec::new());
+    let mut list = LIST.lock().await;
+    if !list.is_empty() {
+        return Ok(list.clone());
+    }
+    let cookies = browser_cookies().await?;
+    // ponytail: höchstens 4 Konten, mehr hat kaum jemand im Browser angemeldet.
+    for index in 0..4 {
+        let Ok(Some(a)) = fetch_account(&cookies, index).await else { break };
+        if list.iter().any(|b| b.email == a.email) {
+            break;
+        }
+        list.push(a);
+    }
+    if list.is_empty() {
+        return Err("No account found".into());
+    }
+    save_accounts(&list);
+    Ok(list.clone())
+}
+
+/// Ein Konto über `account/accounts_list` (eine Anfrage). `None` = keins unter dieser Nummer.
+async fn fetch_account(cookies: &[(String, String)], index: u32) -> Result<Option<Account>, String> {
+    let body = serde_json::json!({ "context": innertube_context() });
+    let text = innertube(cookies, index, "account/accounts_list", &body).await?;
+    Ok(account_from_json(&serde_json::from_str(&text).unwrap_or_default(), index))
+}
+
+/// Name und E-Mail aus dem Kopf der Liste, Bild vom gewählten Eintrag (bei Marken-Kanälen
+/// stehen mehrere Einträge darunter).
+fn account_from_json(json: &serde_json::Value, index: u32) -> Option<Account> {
+    let h = find_key(json, "googleAccountHeaderRenderer")?;
+    let txt = |k: &str| h.pointer(&format!("/{k}/simpleText")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let email = txt("email");
+    if email.is_empty() {
+        return None;
+    }
+    let mut items = Vec::new();
+    collect_key(json, "accountItem", &mut items);
+    let item = items.iter().find(|i| i["isSelected"] == true).or(items.first());
+    // Bild in doppelter Größe (48 → 96 px), damit es auf HiDPI scharf bleibt.
+    let photo = item
+        .and_then(|i| i.pointer("/accountPhoto/thumbnails/0/url"))
+        .and_then(|u| u.as_str())
+        .map(|u| u.replace("=s48-", "=s96-"));
+    Some(Account { index, name: txt("name"), email, photo })
+}
+
+/// Erstes Objekt unter dem Schlüssel `key`, egal wie tief.
+fn find_key<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    match v {
+        serde_json::Value::Object(m) => m.get(key).or_else(|| m.values().find_map(|v| find_key(v, key))),
+        serde_json::Value::Array(a) => a.iter().find_map(|v| find_key(v, key)),
+        _ => None,
+    }
+}
+
+/// Alle Objekte unter dem Schlüssel `key`, egal wie tief.
+fn collect_key<'a>(v: &'a serde_json::Value, key: &str, out: &mut Vec<&'a serde_json::Value>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let Some(x) = m.get(key) {
+                out.push(x);
+            }
+            m.values().for_each(|v| collect_key(v, key, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|v| collect_key(v, key, out)),
+        _ => {}
+    }
+}
+
+/// Kanal abonnieren (`true`) oder deabonnieren (`false`) – über die interne YouTube-API, wie
+/// der Knopf auf youtube.com. Genau eine Anfrage über `throttle()`, keine Wiederholung.
+pub async fn subscribe(channel_id: String, on: bool) -> Result<(), String> {
+    let cookies = browser_cookies().await?;
+    let action = if on { "subscribe" } else { "unsubscribe" };
+    let body = serde_json::json!({ "context": innertube_context(), "channelIds": [channel_id] });
+    let text = innertube(&cookies, account(), &format!("subscription/{action}"), &body).await?;
+    // HTTP 200 heißt nicht, dass es geklappt hat: YouTube meldet den neuen Zustand des Knopfs.
+    let want = format!("\"subscribed\":{on}");
+    if text.replace(' ', "").contains(&want) { Ok(()) } else { Err("YouTube didn't confirm the change".into()) }
+}
+
+fn innertube_context() -> serde_json::Value {
+    serde_json::json!({ "client": { "clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en" } })
+}
+
+/// youtube.com-Cookies aus dem Browser. yt-dlp liest sie aus (kann auch Chromium entschlüsseln):
+/// ohne URL bricht es mit Fehler ab, schreibt die Cookie-Datei aber trotzdem – ohne Netzwerk.
+/// Die Datei liegt nur kurz im Cache.
+async fn browser_cookies() -> Result<Vec<(String, String)>, String> {
+    let browser = COOKIES.clone().ok_or("Not signed in to YouTube in a browser")?;
+    let file = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/tubequ/cookies.tmp");
+    tokio::process::Command::new("yt-dlp")
+        .args(["--cookies-from-browser", &browser, "--cookies"])
+        .arg(&file)
+        .output()
+        .await
+        .map_err(|e| format!("Couldn't run yt-dlp: {e}"))?;
+    let jar = std::fs::read_to_string(&file).unwrap_or_default();
+    let _ = std::fs::remove_file(&file);
+    let cookies = youtube_cookies(&jar);
+    if cookies.iter().any(|(k, _)| k == "SAPISID") { Ok(cookies) } else { Err("Not signed in to YouTube in a browser".into()) }
+}
+
+/// Eine Anfrage an die interne YouTube-API mit Login (über `throttle()`), Antwort als Text.
+/// `account` = Nummer des Google-Kontos im Browser (`X-Goog-AuthUser`).
+async fn innertube(cookies: &[(String, String)], account: u32, endpoint: &str, body: &serde_json::Value) -> Result<String, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let get = |name: &str| cookies.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    // Wie der Browser: alle drei Varianten, die neueren mit ihren eigenen Cookies.
+    let auth = [("SAPISIDHASH", get("SAPISID")), ("SAPISID1PHASH", get("__Secure-1PAPISID")), ("SAPISID3PHASH", get("__Secure-3PAPISID"))]
+        .into_iter()
+        .filter_map(|(label, v)| Some(format!("{label} {}", sapisid_hash(&v?, now))))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cookie = cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
+    throttle().await?;
+    let res = HTTP
+        .post(format!("{YT_ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
+        .header("Authorization", auth)
+        .header("Origin", YT_ORIGIN)
+        .header("X-Origin", YT_ORIGIN)
+        .header("X-Goog-AuthUser", account.to_string())
+        .header("Cookie", cookie)
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0")
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Couldn't reach YouTube: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        return Err(format!("YouTube refused ({status})"));
+    }
+    res.text().await.map_err(|e| e.to_string())
+}
+
+const YT_ORIGIN: &str = "https://www.youtube.com";
+
+/// youtube.com-Cookies (Name, Wert) aus einer Netscape-Cookie-Datei.
+fn youtube_cookies(jar: &str) -> Vec<(String, String)> {
+    jar.lines()
+        .map(|l| l.strip_prefix("#HttpOnly_").unwrap_or(l))
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f.len() == 7 && f[0].trim_start_matches('.').ends_with("youtube.com")).then(|| (f[5].to_string(), f[6].to_string()))
+        })
+        .collect()
+}
+
+/// Ein Teil des Login-Headers: `<zeit>_<sha1("<zeit> <cookie> <origin>")>`.
+fn sapisid_hash(sapisid: &str, now: u64) -> String {
+    use sha1::{Digest, Sha1};
+    let hash = Sha1::digest(format!("{now} {sapisid} {YT_ORIGIN}"));
+    format!("{now}_{}", hash.iter().map(|b| format!("{b:02x}")).collect::<String>())
 }
 
 static THUMB_SLOTS: Semaphore = Semaphore::const_new(THUMB_PARALLEL);
@@ -685,6 +1041,16 @@ async fn image(url: String, file: String) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stats_url_sets_position() {
+        let u = super::stats_url("https://s.youtube.com/api/stats/watchtime?ns=yt&len=600.1&cmt=0&docid=abc", "xyz", 120.5, true);
+        let q: std::collections::HashMap<_, _> = reqwest::Url::parse(&u).unwrap().query_pairs().into_owned().collect();
+        assert_eq!((q["cmt"].as_str(), q["st"].as_str(), q["et"].as_str()), ("120.500", "0", "120.500"));
+        assert_eq!((q["docid"].as_str(), q["cpn"].as_str(), q["el"].as_str(), q["len"].as_str()), ("abc", "xyz", "detailpage", "600.1"));
+        let p = super::stats_url("https://s.youtube.com/api/stats/playback?docid=abc", "xyz", 0.0, false);
+        assert!(!p.contains("et=") && p.contains("cmt=0.000"));
+    }
+
     #[test]
     fn saved_video_round_trip() {
         let v = super::Video { id: "a".into(), title: "T".into(), channel: "C".into(), duration: Some(9), is_live: true, published_at: Some(5), ..Default::default() };
@@ -764,6 +1130,40 @@ mod tests {
         assert_eq!(now.duration_since(h[2]), Duration::ZERO);
     }
 
+    #[test]
+    fn channel_parsing() {
+        let j = serde_json::json!({
+            "channel": "Mosch", "channel_id": "UCx", "channel_follower_count": 1200,
+            "thumbnails": [{"url": "https://yt3/banner=w1060"}, {"url": "https://yt3/av=s0", "id": "avatar_uncropped"}],
+            "entries": [
+                {"id": "a", "title": "A", "duration": 61.0, "view_count": 5, "timestamp": 1_700_000_000},
+                {"id": "b", "title": "Short", "url": "https://www.youtube.com/shorts/b"}
+            ]
+        });
+        let (info, page) = channel_from_json(&j, "UCx", "u".into());
+        assert_eq!((info.name.as_str(), info.avatar.as_deref()), ("Mosch", Some("https://yt3/av=s176")));
+        assert_eq!(info.subscribers, Some(1200));
+        assert_eq!(page.videos.len(), 1, "Shorts raus");
+        assert_eq!((page.videos[0].duration, page.videos[0].views, page.videos[0].published_at), (Some(61), Some(5), Some(1_700_000_000)));
+        assert!(page.next.is_none(), "keine volle Seite = Ende");
+    }
+
+    #[test]
+    fn account_parsing() {
+        let j: serde_json::Value = serde_json::from_str(r#"{"actions":[{"menu":{"header":{"googleAccountHeaderRenderer":{"name":{"simpleText":"Simon"},"email":{"simpleText":"s@x.com"}}},"items":[{"accountItem":{"isSelected":false,"accountPhoto":{"thumbnails":[{"url":"https://a/b=s48-c"}]}}},{"accountItem":{"isSelected":true,"accountPhoto":{"thumbnails":[{"url":"https://a/c=s48-c"}]}}}]}}]}"#).unwrap();
+        let a = account_from_json(&j, 1).unwrap();
+        assert_eq!(a, Account { index: 1, name: "Simon".into(), email: "s@x.com".into(), photo: Some("https://a/c=s96-c".into()) });
+        assert!(account_from_json(&serde_json::json!({}), 0).is_none());
+        assert_eq!(parse_accounts("1\tSimon\ts@x.com\thttps://a/c=s96-c\nxx\n0\tA\ta@x\t\n"), [a, Account { index: 0, name: "A".into(), email: "a@x".into(), photo: None }]);
+    }
+
+    #[test]
+    fn subscribe_auth() {
+        let jar = "# Netscape\n.youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tabc\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx\n.google.com\tTRUE\t/\tTRUE\t0\tNID\ty\n";
+        assert_eq!(youtube_cookies(jar), [("SAPISID".into(), "abc".into()), ("SID".into(), "x".into())]);
+        assert_eq!(sapisid_hash("abc", 1), "1_76945995212dc850298a9feccea18a02639c6f64");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn throttle_spaces_and_caps() {
         let start = Instant::now();
@@ -790,13 +1190,11 @@ mod tests {
         assert_eq!(&jpg[..2], &[0xFF, 0xD8], "JPEG erwartet");
 
         let cid = p.videos[0].channel_id.clone().expect("Kanal-ID");
-        let (info, vids) = channel(cid.clone(), false).await.unwrap();
+        let (info, vids) = channel(cid.clone()).await.unwrap();
         println!("{info:#?}");
         assert!(!vids.videos.is_empty() && !vids.videos[0].channel.is_empty());
         assert!(!avatar(info.avatar.expect("Avatar")).await.unwrap().is_empty());
-        if info.has_live {
-            channel(cid, true).await.unwrap();
-        }
+        assert!(vids.videos[0].published_at.is_some(), "ungefähres Datum");
 
         // Startseite mit Browser-Login (falls vorhanden)
         let d = details(p.videos[0].id.clone()).await.unwrap();

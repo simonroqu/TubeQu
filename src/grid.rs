@@ -240,9 +240,33 @@ const ROWS_BEFORE_SHELF: usize = 4;
 /// Höchstens so viele Videos in „Weiterschauen“.
 const SHELF_MAX: usize = 3;
 
-/// Spalten für eine Breite: so viele 320-px-Karten wie passen, höchstens `MAX_COLUMNS`.
-fn columns(width: i32) -> usize {
-    ((width + COLUMN_SPACING) / (CARD_WIDTH + COLUMN_SPACING + 8)).clamp(1, MAX_COLUMNS) as usize
+/// Mit Strg+Mausrad wählbare Spaltenzahl.
+const MIN_WANT: usize = 3;
+const MAX_WANT: usize = 6;
+/// Gewählte Spalten werden nur so weit gezeigt, wie Karten dieser Breite noch passen.
+const MIN_CARD_WIDTH: i32 = 200;
+
+/// Spalten für eine Breite: ohne Wahl so viele 320-px-Karten wie passen, höchstens `MAX_COLUMNS`;
+/// mit Strg+Mausrad gewählt (`want`) diese Zahl, solange Karten ≥ `MIN_CARD_WIDTH` passen.
+fn columns(width: i32, want: Option<usize>) -> usize {
+    let fit = |card: i32| ((width + COLUMN_SPACING) / (card + COLUMN_SPACING + 8)).max(1) as usize;
+    match want {
+        Some(n) => n.min(fit(MIN_CARD_WIDTH)),
+        None => fit(CARD_WIDTH).min(MAX_COLUMNS as usize),
+    }
+}
+
+thread_local! {
+    /// Gewählte Spaltenzahl, gilt für alle Raster (Startseite, Kanal); gespeichert in `~/.config/tubequ/columns`.
+    static WANT: Cell<Option<usize>> = Cell::new(
+        std::fs::read_to_string(crate::controls::config_file("columns")).ok().and_then(|s| s.trim().parse().ok()),
+    );
+}
+
+/// Eine Spalte mehr (`dy` < 0, Mausrad hoch) oder weniger, in `MIN_WANT..=MAX_WANT`.
+fn step_columns(current: usize, dy: f64) -> usize {
+    let n = if dy < 0.0 { current + 1 } else { current.saturating_sub(1) };
+    n.clamp(MIN_WANT, MAX_WANT)
 }
 
 fn flowbox() -> gtk::FlowBox {
@@ -285,6 +309,8 @@ pub struct Grid {
     /// Startseite: mit „Weiterschauen“-Reihe.
     home: Cell<bool>,
     columns: Cell<usize>,
+    /// Zuletzt gemessene Breite (ohne Seitenränder), um bei geänderter Spaltenwahl neu aufzuteilen.
+    width: Cell<i32>,
     /// Breite einer Spalte, damit „Weiterschauen“-Karten so breit sind wie die im Raster.
     column_width: Cell<i32>,
     /// Wird bei jedem neuen Inhalt erhöht, damit verspätete Antworten alter Suchen verworfen werden.
@@ -400,6 +426,7 @@ impl Grid {
             loading: Cell::new(false),
             home: Cell::new(false),
             columns: Cell::new(3),
+            width: Cell::new(0),
             column_width: Cell::new(CARD_WIDTH),
             generation: Cell::new(0),
             last: RefCell::default(),
@@ -420,24 +447,37 @@ impl Grid {
         sizer.connect_resize({
             let grid = Rc::downgrade(&grid);
             move |_, page_width, _| {
-                // Abzüglich der Seitenränder des Inhalts (je 16 px).
-                let width = page_width - 32;
-                let cols = columns(width);
-                let Some(grid) = grid.upgrade() else { return };
-                let col_width = (width - (cols as i32 - 1) * COLUMN_SPACING) / cols as i32;
-                if (col_width - grid.column_width.get()).abs() > 4 {
-                    grid.column_width.set(col_width);
-                    for pic in grid.pics.borrow().iter().chain(grid.shelf_pics.borrow().iter()) {
-                        pic.set_height_request(thumb_height(col_width));
-                    }
-                }
-                if cols != grid.columns.get() {
-                    grid.columns.set(cols);
-                    // Nicht mitten in der Größenberechnung umbauen, sondern direkt danach.
-                    glib::idle_add_local_once(move || grid.layout());
+                if let Some(grid) = grid.upgrade() {
+                    // Abzüglich der Seitenränder des Inhalts (je 16 px).
+                    grid.width.set(page_width - 32);
+                    grid.fit();
                 }
             }
         });
+
+        // Strg+Mausrad: eine Spalte mehr/weniger (vor dem weichen Scrollen der Seite).
+        let zoom_ctl = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        zoom_ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
+        zoom_ctl.connect_scroll({
+            let grid = Rc::downgrade(&grid);
+            move |c, _, dy| {
+                let Some(grid) = grid.upgrade() else { return glib::Propagation::Proceed };
+                if !c.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
+                    return glib::Propagation::Proceed;
+                }
+                // ponytail: Touchpad (Pixel statt Rasten) wird nur geschluckt; aufsummieren, falls gewünscht.
+                if c.unit() == gdk::ScrollUnit::Wheel && dy != 0.0 {
+                    let n = step_columns(grid.columns.get(), dy);
+                    WANT.set(Some(n));
+                    let f = crate::controls::config_file("columns");
+                    let _ = std::fs::create_dir_all(f.parent().unwrap());
+                    let _ = std::fs::write(f, n.to_string());
+                    grid.fit();
+                }
+                glib::Propagation::Stop
+            }
+        });
+        grid.widget.add_controller(zoom_ctl);
 
         // Eine Bildschirmhöhe vor dem Ende: nächste Seite holen, damit man beim Scrollen nicht am Ende
         // hängen bleibt. Weiter vorher nicht: jede Seite ist eine Anfrage an YouTube.
@@ -458,6 +498,8 @@ impl Grid {
             let grid = Rc::downgrade(&grid);
             move |_| {
                 if let Some(grid) = grid.upgrade() {
+                    // Spaltenwahl kann sich auf einer anderen Seite (anderes Raster) geändert haben.
+                    grid.fit();
                     for (v, bar) in grid.videos.borrow().iter().zip(grid.bars.borrow().iter()) {
                         set_progress(bar, &v.id);
                     }
@@ -533,6 +575,28 @@ impl Grid {
             }
         }
         self.layout();
+    }
+
+    /// Spaltenzahl und Bildhöhen aus der gemessenen Breite und der Spaltenwahl.
+    fn fit(self: &Rc<Self>) {
+        let width = self.width.get();
+        if width <= 0 {
+            return;
+        }
+        let cols = columns(width, WANT.get());
+        let col_width = (width - (cols as i32 - 1) * COLUMN_SPACING) / cols as i32;
+        if (col_width - self.column_width.get()).abs() > 4 {
+            self.column_width.set(col_width);
+            for pic in self.pics.borrow().iter().chain(self.shelf_pics.borrow().iter()) {
+                pic.set_height_request(thumb_height(col_width));
+            }
+        }
+        if cols != self.columns.get() {
+            self.columns.set(cols);
+            // Nicht mitten in der Größenberechnung umbauen, sondern direkt danach.
+            let grid = self.clone();
+            glib::idle_add_local_once(move || grid.layout());
+        }
     }
 
     /// Verteilt die Karten: die ersten Reihen nach oben, den Rest unter „Weiterschauen“.
@@ -732,10 +796,17 @@ mod tests {
         assert_eq!(fmt_views(3_000_000), "3M");
         assert_eq!(fmt_views(2_500_000_000), "2.5B");
         // Spalten: schmal 1, mittel 2–3, breit/Vollbild höchstens 4.
-        assert_eq!(columns(300), 1);
-        assert_eq!(columns(1000), 2);
-        assert_eq!(columns(1100), 3);
-        assert_eq!(columns(2528), 4);
+        assert_eq!(columns(300, None), 1);
+        assert_eq!(columns(1000, None), 2);
+        assert_eq!(columns(1100, None), 3);
+        assert_eq!(columns(2528, None), 4);
+        // Gewählt: so viele, wie 200-px-Karten passen.
+        assert_eq!(columns(2528, Some(6)), 6);
+        assert_eq!(columns(1100, Some(6)), 4);
+        assert_eq!(step_columns(4, -1.0), 5);
+        assert_eq!(step_columns(6, -1.0), 6);
+        assert_eq!(step_columns(3, 1.0), 3);
+        assert_eq!(step_columns(1, -1.0), 3);
         assert_eq!(thumb_height(640), 360);
     }
 }
