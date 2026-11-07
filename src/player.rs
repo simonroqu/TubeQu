@@ -150,6 +150,8 @@ impl Player {
                 i.set_property("ytdl", true)?;
                 i.set_property("ytdl-format", crate::controls::format_for(crate::controls::saved_quality()))?;
                 i.set_property("hwdec", "auto-safe")?;
+                // Lauter als normal erlaubt (bis 200 %, mpv-Standard 130 %).
+                i.set_property("volume-max", crate::controls::MAX_VOLUME)?;
                 i.set_property("volume", crate::controls::saved_volume())?;
                 i.set_property("keep-open", true)?;
                 // Sprünge zum nächsten Schlüsselbild statt bildgenau: YouTube drosselt Downloads auf etwa
@@ -170,7 +172,7 @@ impl Player {
                 i.set_property("stream-lavf-o", "request_size=10485760")?;
                 // Lautstärke angleichen (YouTube normalisiert, mpv nicht): sanft, großes Zeitfenster gegen
                 // „Pumpen“. Kein spürbarer Startverzug (getestet).
-                i.set_property("af", "lavfi=[dynaudnorm=f=250:g=15:p=0.95]")?;
+                i.set_property("af", "lavfi=[dynaudnorm=f=250:g=15:p=0.95],@fade:lavfi=[volume=1]")?;
                 // Untertitel: auch automatische, aber nur Deutsch/Englisch (sonst ~100 Übersetzungen).
                 // Geladen wird eine Spur erst beim Einschalten (Taste c) – keine Extra-Anfrage beim Start.
                 // Wert ohne Komma: mpv trennt die Optionen an Kommas.
@@ -385,6 +387,7 @@ impl Player {
         });
         widget.add_overlay(&end_box);
         widget.add_overlay(&controls.widget);
+        widget.add_overlay(&controls.preview);
         let on_playing: Rc<RefCell<Option<Box<dyn Fn(bool)>>>> = Rc::default();
 
         glib::spawn_future_local({
@@ -627,7 +630,14 @@ impl Player {
         }
     }
 
-    /// Wiedergabe beenden (Ansehen-Seite verlassen, App schließen). Speichert vorher die Position.
+    /// Läuft ein Video (geladen, kein Fehler, nicht am Ende)? Dann geht es beim Verlassen in den Miniplayer.
+    pub fn active(&self) -> bool {
+        self.track.borrow().load.is_some()
+            && !self.msg.is_visible()
+            && !self.end_home.parent().is_some_and(|b| b.is_visible())
+    }
+
+    /// Wiedergabe beenden (Miniplayer schließen, App schließen). Speichert vorher die Position.
     pub fn stop(&self) {
         save(self.mpv, &self.track);
         self.track.replace(Track::default());
@@ -661,6 +671,22 @@ impl Player {
             self.controls.poke();
             return true;
         }
+        // Lautstärke und Ton weich (controls.rs), nicht als harter Sprung.
+        match key {
+            gdk::Key::Up | gdk::Key::plus | gdk::Key::KP_Add => {
+                self.controls.step_volume(5.0);
+                return true;
+            }
+            gdk::Key::Down | gdk::Key::minus | gdk::Key::KP_Subtract => {
+                self.controls.step_volume(-5.0);
+                return true;
+            }
+            gdk::Key::m => {
+                self.controls.toggle_mute();
+                return true;
+            }
+            _ => {}
+        }
         let cmd: &[&str] = match key {
             gdk::Key::space | gdk::Key::k => &["cycle", "pause"],
             gdk::Key::Left => return jump(-5),
@@ -672,9 +698,6 @@ impl Player {
             gdk::Key::period => &["frame-step"],
             gdk::Key::c => &["cycle", "sub"],
             // Lautstärke: + / - (auch Ziffernblock) und Pfeile hoch/runter.
-            gdk::Key::Up | gdk::Key::plus | gdk::Key::KP_Add => &["add", "volume", "5"],
-            gdk::Key::Down | gdk::Key::minus | gdk::Key::KP_Subtract => &["add", "volume", "-5"],
-            gdk::Key::m => &["cycle", "mute"],
             gdk::Key::greater => return self.speed(1),
             gdk::Key::less => return self.speed(-1),
             _ => return false,

@@ -5,7 +5,7 @@
 use gtk4 as gtk;
 use std::path::PathBuf;
 
-const ICONS: [(&str, &str); 16] = [
+const ICONS: [(&str, &str); 17] = [
     ("tube-search-symbolic", include_str!("../data/icons/tube-search-symbolic.svg")),
     ("tube-home-symbolic", include_str!("../data/icons/tube-home-symbolic.svg")),
     ("tube-back-symbolic", include_str!("../data/icons/tube-back-symbolic.svg")),
@@ -22,6 +22,7 @@ const ICONS: [(&str, &str); 16] = [
     ("tube-subtitles-symbolic", include_str!("../data/icons/tube-subtitles-symbolic.svg")),
     ("tube-menu-symbolic", include_str!("../data/icons/tube-menu-symbolic.svg")),
     ("tube-spinner-symbolic", include_str!("../data/icons/tube-spinner-symbolic.svg")),
+    ("tube-close-symbolic", include_str!("../data/icons/tube-close-symbolic.svg")),
 ];
 
 /// Lade-Kreis: eigenes Icon, per CSS gedreht (`.tube-spinner` in style.css), sichtbar = läuft.

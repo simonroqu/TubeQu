@@ -140,7 +140,8 @@ fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk
         .build();
     load_thumb(&pic, v.id.clone());
 
-    let thumb = gtk::Overlay::builder().child(&pic).build();
+    // Grauer Platzhalter in Bildgröße, bis das Bild da ist; schneidet auch den Hover-Zoom ab.
+    let thumb = gtk::Overlay::builder().child(&pic).overflow(gtk::Overflow::Hidden).css_classes(["thumb-box"]).build();
     let badge = if v.is_live { Some("● LIVE".to_string()) } else { v.duration.map(fmt_duration) };
     if let Some(b) = badge {
         let l = gtk::Label::builder()
@@ -180,6 +181,8 @@ fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk
 }
 
 fn load_thumb(pic: &gtk::Picture, id: String) {
+    // Unsichtbar bis zum Laden, dann einblenden (style.css `.fade`).
+    pic.add_css_class("fade");
     let pic = pic.downgrade();
     glib::spawn_future_local(async move {
         let Ok(bytes) = bg(youtube::thumbnail(id)).await else { return };
@@ -189,6 +192,7 @@ fn load_thumb(pic: &gtk::Picture, id: String) {
         };
         if let Some(pic) = pic.upgrade() {
             pic.set_paintable(Some(&tex));
+            pic.add_css_class("loaded");
         }
     });
 }
@@ -359,6 +363,7 @@ impl Grid {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
             .build();
+        crate::smooth::attach(&scroll);
         let widget = gtk::Overlay::builder().child(&scroll).build();
         // Kurze Hinweise unten („Saved to Watch later“ …).
         let note = gtk::Label::builder()
@@ -434,11 +439,13 @@ impl Grid {
             }
         });
 
-        // Am unteren Ende angekommen: nächste Seite holen.
-        grid.scroll.connect_edge_reached({
+        // Eine Bildschirmhöhe vor dem Ende: nächste Seite holen, damit man beim Scrollen nicht am Ende
+        // hängen bleibt. Weiter vorher nicht: jede Seite ist eine Anfrage an YouTube.
+        grid.scroll.vadjustment().connect_value_changed({
             let grid = Rc::downgrade(&grid);
-            move |_, pos| {
-                if pos == gtk::PositionType::Bottom
+            move |adj| {
+                if adj.value() > 0.0
+                    && adj.value() + 2.0 * adj.page_size() >= adj.upper()
                     && let Some(grid) = grid.upgrade()
                 {
                     grid.load_more();

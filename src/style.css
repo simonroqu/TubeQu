@@ -281,3 +281,63 @@ scale.timeline highlight {
   animation: tube-spin 0.8s linear infinite;
   opacity: 0.8;
 }
+
+/* Miniplayer (watch.rs `set_mini`): Schatten, damit er sich von der Seite darunter abhebt. */
+.mini .rounded {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* Vorschaubilder: grauer Platzhalter in Bildgröße, sanft einblenden (grid.rs `.fade` → `.loaded`),
+   beim Drüberfahren leicht zoomen (abgeschnitten von `.thumb-box`). */
+.thumb-box {
+  border-radius: var(--radius-s);
+  background: alpha(currentColor, 0.06);
+}
+
+.thumb,
+.fade {
+  transition: opacity 250ms ease-out, transform 200ms ease-out;
+}
+
+.fade {
+  opacity: 0;
+}
+
+.fade.loaded {
+  opacity: 1;
+}
+
+flowboxchild:hover .thumb {
+  transform: scale(1.04);
+}
+
+/* Tastatur-Navigation im Raster: dezenter Rahmen um die gewählte Karte. */
+flowboxchild:focus-visible {
+  outline: 2px solid alpha(currentColor, 0.5);
+  outline-offset: 2px;
+}
+
+/* Ansehen-Seite blendet ein (main.rs `Nav::show`), Miniplayer gleitet in die Ecke. */
+@keyframes page-in-a {
+  from { opacity: 0; }
+}
+
+@keyframes page-in-b {
+  from { opacity: 0; }
+}
+
+.page-in-a {
+  animation: page-in-a 180ms ease-out;
+}
+
+.page-in-b {
+  animation: page-in-b 180ms ease-out;
+}
+
+@keyframes mini-in {
+  from { opacity: 0; transform: translate(40px, 40px) scale(0.85); }
+}
+
+.mini {
+  animation: mini-in 250ms ease-out;
+}

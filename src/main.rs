@@ -7,6 +7,7 @@ mod nav_shape;
 mod player;
 mod progress;
 mod search;
+mod smooth;
 mod sponsorblock;
 mod theme;
 mod watch;
@@ -74,6 +75,9 @@ struct Nav {
     nav_bar: gtk::Revealer,
     page_layer: gtk::Overlay,
     in_player: std::cell::Cell<bool>,
+    watch: Rc<watch::WatchPage>,
+    /// Knöpfe im Miniplayer (Pause, Ton, Zurück zum Video, Schließen).
+    mini_bar: gtk::Box,
 }
 
 impl Nav {
@@ -82,16 +86,35 @@ impl Nav {
     }
 
     fn show(&self, page: &str) {
-        // Verlässt man die Ansehen-Seite, stoppt das Video: Player gibt es nur beim Abspielen.
-        if self.current() == "watch" && page != "watch" {
-            self.player.stop();
+        let watch = page == "watch";
+        // Ansehen-Seite erscheint (neu oder aus dem Miniplayer): kurz einblenden.
+        let appear = watch && (self.current() != "watch" || self.watch.is_mini());
+        // Verlässt man die Ansehen-Seite, läuft ein laufendes Video im Miniplayer weiter, sonst stoppt es.
+        if self.current() == "watch" && !watch {
             self.window.unfullscreen();
-            self.window.set_title(Some("Tube"));
+            if self.player.active() {
+                self.set_mini(true);
+            } else {
+                self.close_mini();
+            }
+        }
+        if watch {
+            self.set_mini(false);
+        } else if self.watch.is_mini() && !self.player.active() {
+            // Im Miniplayer zu Ende gelaufen (z. B. „Home“ im Endbildschirm): weg damit.
+            self.close_mini();
+        }
+        self.watch.widget.set_visible(watch || self.watch.is_mini());
+        if appear {
+            // Die CSS-Animation startet nur neu, wenn sich ihr Name ändert: zwischen a und b wechseln.
+            let w = &self.watch.widget;
+            let a = w.has_css_class("page-in-a");
+            w.remove_css_class(if a { "page-in-a" } else { "page-in-b" });
+            w.add_css_class(if a { "page-in-b" } else { "page-in-a" });
         }
         self.stack.set_visible_child_name(page);
         self.back.set_visible(!self.history.borrow().is_empty());
 
-        let watch = page == "watch";
         if watch != self.in_player.get() {
             let (from, to) = if watch { (&self.page_layer, &self.player.widget) } else { (&self.player.widget, &self.page_layer) };
             from.remove_overlay(&self.nav_bar);
@@ -99,6 +122,24 @@ impl Nav {
             self.in_player.set(watch);
         }
         self.nav_bar.set_reveal_child(!watch || self.player.controls.widget.reveals_child());
+    }
+
+    fn set_mini(&self, on: bool) {
+        self.watch.set_mini(on);
+        self.mini_bar.set_visible(on);
+        // Die große Leiste passt nicht in den kleinen Player.
+        self.player.controls.widget.set_visible(!on);
+    }
+
+    /// Miniplayer schließen bzw. Video beenden (speichert die Position).
+    fn close_mini(&self) {
+        // Das Video hat den Tastatur-Fokus. Verschwindet es damit, gibt GTK den Fokus der ersten Karte,
+        // und die Liste springt nach oben. Darum vorher den Fokus abgeben.
+        gtk::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
+        self.player.stop();
+        self.set_mini(false);
+        self.watch.widget.set_visible(self.current() == "watch");
+        self.window.set_title(Some("Tube"));
     }
 
     fn go(&self, page: &str) {
@@ -245,26 +286,6 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         window.set_child(Some(&gtk::WindowHandle::builder().child(&root).build()));
     }
 
-    let nav = Rc::new(Nav {
-        stack: stack.clone(),
-        back: back.clone(),
-        window: window.clone(),
-        player: player.clone(),
-        history: RefCell::default(),
-        nav_bar: nav_bar.clone(),
-        page_layer: page_layer.clone(),
-        in_player: std::cell::Cell::new(false),
-    });
-    // Beim Video: Navigation blendet sich zusammen mit der Player-Leiste ein und aus.
-    player.controls.widget.connect_reveal_child_notify({
-        let nav = nav.clone();
-        move |r| {
-            if nav.in_player.get() {
-                nav.nav_bar.set_reveal_child(r.reveals_child());
-            }
-        }
-    });
-
     // Kanalseite öffnen. Wird erst unten befüllt, weil Kanalseite und Ansehen-Seite sich gegenseitig brauchen.
     let open_channel_cell: Rc<std::cell::OnceCell<Rc<dyn Fn(String)>>> = Rc::default();
     let open_channel_late: Rc<dyn Fn(String)> = Rc::new({
@@ -301,6 +322,70 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         }
     });
     let watch = watch::WatchPage::new(&player.widget, open_channel_late.clone(), on_link);
+
+    // Miniplayer: kleine Bubble im Video. Die Symbole folgen den Knöpfen der großen Leiste.
+    let mini_bar = gtk::Box::builder()
+        .spacing(2)
+        .height_request(32)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::End)
+        .margin_bottom(8)
+        .css_classes(["bubble"])
+        .visible(false)
+        .build();
+    let mini_play = nav_button("tube-pause-symbolic", "Play/Pause");
+    player.controls.play.bind_property("icon-name", &mini_play, "icon-name").sync_create().build();
+    let mini_mute = nav_button("tube-volume-symbolic", "Mute");
+    player.controls.mute.bind_property("icon-name", &mini_mute, "icon-name").sync_create().build();
+    let mini_open = nav_button("tube-fullscreen-symbolic", "Back to video");
+    let mini_close = nav_button("tube-close-symbolic", "Close");
+    for b in [&mini_play, &mini_mute, &mini_open, &mini_close] {
+        mini_bar.append(b);
+    }
+    mini_play.connect_clicked({
+        let mpv = player.mpv;
+        move |_| {
+            let _ = mpv.command("cycle", &["pause"]);
+        }
+    });
+    mini_mute.connect_clicked({
+        let controls = player.controls.clone();
+        move |_| controls.toggle_mute()
+    });
+    watch.widget.add_overlay(&mini_bar);
+    // Über den Seiten, unter Navigation (wird beim Seitenwechsel neu obenauf gelegt) und Suche.
+    page_layer.add_overlay(&watch.widget);
+
+    let nav = Rc::new(Nav {
+        stack: stack.clone(),
+        back: back.clone(),
+        window: window.clone(),
+        player: player.clone(),
+        history: RefCell::default(),
+        nav_bar: nav_bar.clone(),
+        page_layer: page_layer.clone(),
+        in_player: std::cell::Cell::new(false),
+        watch: watch.clone(),
+        mini_bar: mini_bar.clone(),
+    });
+    mini_open.connect_clicked({
+        let nav = nav.clone();
+        move |_| nav.go("watch")
+    });
+    mini_close.connect_clicked({
+        let nav = nav.clone();
+        move |_| nav.close_mini()
+    });
+    // Beim Video: Navigation blendet sich zusammen mit der Player-Leiste ein und aus.
+    player.controls.widget.connect_reveal_child_notify({
+        let nav = nav.clone();
+        move |r| {
+            if nav.in_player.get() {
+                nav.nav_bar.set_reveal_child(r.reveals_child());
+            }
+        }
+    });
+
 
     let play: Rc<dyn Fn(Video)> = Rc::new({
         let (nav, player, watch) = (nav.clone(), player.clone(), watch.clone());
@@ -355,7 +440,8 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     );
     stack.add_named(&grid.widget, Some("browse"));
     stack.add_named(&channel_page.widget, Some("channel"));
-    stack.add_named(&watch.widget, Some("watch"));
+    // Platzhalter: die Ansehen-Seite selbst liegt als Ebene darüber (damit sie auch als Miniplayer geht).
+    stack.add_named(&gtk::Box::new(gtk::Orientation::Horizontal, 0), Some("watch"));
 
     // Reload: aktuelle Seite neu laden (Startseite/Suche, Kanal oder Video).
     let reload_page: Rc<dyn Fn()> = Rc::new({
@@ -552,6 +638,15 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                     true
                 }
                 k if watching => player.key(k),
+                // Pfeiltasten, solange nichts auf der Seite gewählt ist (nach dem Start, mit Miniplayer):
+                // erste Karte wählen, danach navigiert GTK selbst im Raster weiter (Enter öffnet).
+                gdk::Key::Up | gdk::Key::Down | gdk::Key::Left | gdk::Key::Right => {
+                    let page = nav.stack.visible_child();
+                    match page {
+                        Some(p) if gtk::prelude::GtkWindowExt::focus(&window).is_none_or(|f| !f.is_ancestor(&p)) => p.child_focus(gtk::DirectionType::TabForward),
+                        _ => false,
+                    }
+                }
                 _ => false,
             };
             if handled { glib::Propagation::Stop } else { glib::Propagation::Proceed }

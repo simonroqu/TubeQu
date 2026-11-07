@@ -41,12 +41,20 @@ fn quality_file() -> PathBuf {
     config_file("quality")
 }
 
-/// Zuletzt eingestellte Lautstärke (0–100), bleibt über Neustarts erhalten.
+/// Ein-/Ausblenden des Tons und Lautstärke-Rampen: so viele Schritte in diesem Abstand (zusammen 160 ms).
+const FADE_STEPS: u32 = 8;
+const FADE_STEP: Duration = Duration::from_millis(20);
+
+/// Höchste Lautstärke in % (Regler-Ende). 100 = normal, liegt so in der Mitte des Reglers.
+pub const MAX_VOLUME: f64 = 200.0;
+
+/// Zuletzt eingestellte Lautstärke (0–`MAX_VOLUME`), bleibt über Neustarts erhalten.
+/// Standard 100 = normale Lautstärke, der Regler steht dann in der Mitte.
 pub fn saved_volume() -> f64 {
     std::fs::read_to_string(config_file("volume"))
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())
-        .map_or(100.0, |v| v.clamp(0.0, 100.0))
+        .map_or(100.0, |v| v.clamp(0.0, MAX_VOLUME))
 }
 
 fn save_volume(v: f64) {
@@ -80,13 +88,15 @@ fn chapter_at(chapters: &[(f64, String)], pos: f64) -> Option<&str> {
 
 pub struct Controls {
     pub widget: gtk::Revealer,
+    /// Vorschau über der Timeline; liegt als eigene Ebene im Player (player.rs), nicht in der Leiste.
+    pub preview: gtk::Box,
     pub fullscreen: gtk::Button,
     mpv: &'static Mpv,
-    play: gtk::Button,
+    pub play: gtk::Button,
     seek: gtk::Scale,
     time: gtk::Label,
     vol: gtk::Scale,
-    mute: gtk::Button,
+    pub mute: gtk::Button,
     settings: gtk::MenuButton,
     speed_buttons: Vec<(f64, gtk::CheckButton)>,
     /// Bekommt beim Ausblenden einen unsichtbaren Mauszeiger.
@@ -105,6 +115,12 @@ pub struct Controls {
     pos: Cell<f64>,
     dur: Cell<f64>,
     speed: Cell<f64>,
+    /// Ton aus (von mpv gemeldet) und laufende Ein-/Ausblendung bzw. Lautstärke-Rampe (Nummer, damit eine
+    /// neuere die ältere abbricht).
+    muted: Cell<bool>,
+    fade_gen: Cell<u32>,
+    vol_gen: Cell<u32>,
+    vol_target: Cell<Option<f64>>,
     live: Cell<bool>,
     paused: Cell<bool>,
 }
@@ -117,6 +133,22 @@ fn icon_button(icon: &str, tip: &str) -> gtk::Button {
         // Kein Fokus, sonst würde die Leertaste den zuletzt geklickten Button auslösen.
         .focusable(false)
         .build()
+}
+
+/// Abstand der Vorschau über der Timeline-Schiene.
+const PREVIEW_GAP: f32 = 24.0;
+
+/// Vorschau mittig über der Maus (nicht über die Enden der Timeline hinaus) und immer gleich hoch über
+/// der Schiene. Gerechnet in der Ebene, in der sie liegt: so verschieben sie weder Kapitel-Striche
+/// unter der Schiene noch eine höhere Vorschau.
+fn place_preview(preview: &gtk::Box, seek: &gtk::Scale, trough: &gtk::Widget, x: f64) {
+    let Some(layer) = preview.parent() else { return };
+    let (Some(tr), Some(sk)) = (trough.compute_bounds(&layer), seek.compute_bounds(&layer)) else { return };
+    let w = preview.width().max(preview.first_child().map_or(0, |c| c.width_request())).max(60) as f64;
+    let lo = sk.x() as f64;
+    let hi = (lo + sk.width() as f64 - w).max(lo);
+    preview.set_margin_start((lo + x - w / 2.0).clamp(lo, hi) as i32);
+    preview.set_margin_bottom((layer.height() as f32 - tr.y() + PREVIEW_GAP).max(0.0) as i32);
 }
 
 fn slider(max: f64) -> gtk::Scale {
@@ -153,14 +185,11 @@ impl Controls {
         seek.set_hexpand(true);
 
         let mute = icon_button("tube-volume-symbolic", "Mute (m)");
-        mute.connect_clicked(move |_| {
-            let _ = mpv.command("cycle", &["mute"]);
-        });
-        let vol = slider(100.0);
+        let vol = slider(MAX_VOLUME);
         vol.set_width_request(90);
         vol.set_margin_end(8);
         vol.connect_change_value(move |_, _, v| {
-            let _ = mpv.set_property("volume", v.clamp(0.0, 100.0));
+            let _ = mpv.set_property("volume", v.clamp(0.0, MAX_VOLUME));
             glib::Propagation::Proceed
         });
 
@@ -268,6 +297,7 @@ impl Controls {
             .orientation(gtk::Orientation::Vertical)
             .spacing(6)
             .halign(gtk::Align::Start)
+            .valign(gtk::Align::End)
             .can_target(false)
             .visible(false)
             .build();
@@ -327,7 +357,6 @@ impl Controls {
         });
         let seek_row = gtk::Overlay::builder().child(&seek).build();
         seek_row.add_overlay(&segment_layer);
-        bar.append(&preview);
         bar.append(&seek_row);
 
         let hover = gtk::EventControllerMotion::new();
@@ -358,10 +387,7 @@ impl Controls {
                     None => label.set_text(&fmt_duration(t as u32)),
                 }
                 show_frame(&pic, &storyboard, &sheets, t);
-                // Mittig über der Maus, aber nicht über den Rand hinaus.
-                let w = preview.width().max(pic.width_request()).max(60) as f64;
-                let max = (seek.width() as f64 - w).max(0.0);
-                preview.set_margin_start((x - w / 2.0).clamp(0.0, max) as i32);
+                place_preview(&preview, &seek, &trough, x);
                 preview.set_visible(true);
             }
         });
@@ -379,8 +405,9 @@ impl Controls {
             .valign(gtk::Align::End)
             .build();
 
-        Rc::new(Controls {
+        let c = Rc::new(Controls {
             widget,
+            preview: preview.clone(),
             fullscreen,
             mpv,
             play,
@@ -401,9 +428,22 @@ impl Controls {
             pos: Cell::new(0.0),
             dur: Cell::new(0.0),
             speed: Cell::new(1.0),
+            muted: Cell::new(false),
+            fade_gen: Cell::new(0),
+            vol_gen: Cell::new(0),
+            vol_target: Cell::new(None),
             live: Cell::new(false),
             paused: Cell::new(false),
-        })
+        });
+        c.mute.connect_clicked({
+            let c = Rc::downgrade(&c);
+            move |_| {
+                if let Some(c) = c.upgrade() {
+                    c.toggle_mute();
+                }
+            }
+        });
+        c
     }
 
     /// Leiste zeigen und das Ausblenden neu starten (bei Mausbewegung, Taste, Pause …).
@@ -495,6 +535,56 @@ impl Controls {
         let _ = self.mpv.set_property("speed", next);
     }
 
+    /// Ton weich aus- bzw. einblenden statt hart umzuschalten (Filter `@fade` in player.rs; die
+    /// Lautstärke selbst bleibt dabei unberührt). Knopf, Taste `m` und Miniplayer.
+    pub fn toggle_mute(self: &Rc<Self>) {
+        let muting = !self.muted.get();
+        let generation = self.fade_gen.get() + 1;
+        self.fade_gen.set(generation);
+        if !muting {
+            let _ = self.mpv.command("af-command", &["fade", "volume", "0"]);
+            let _ = self.mpv.set_property("mute", false);
+        }
+        for i in 1..=FADE_STEPS {
+            let me = self.clone();
+            glib::timeout_add_local_once(FADE_STEP * i, move || {
+                if me.fade_gen.get() != generation {
+                    return;
+                }
+                let f = i as f64 / FADE_STEPS as f64;
+                let level = if muting { 1.0 - f } else { f };
+                let _ = me.mpv.command("af-command", &["fade", "volume", &format!("{level:.3}")]);
+                if muting && i == FADE_STEPS {
+                    let _ = me.mpv.set_property("mute", true);
+                    let _ = me.mpv.command("af-command", &["fade", "volume", "1"]);
+                }
+            });
+        }
+    }
+
+    /// Lautstärke um `delta` ändern, in kleinen Schritten statt eines Sprungs (Tasten `+`/`-`).
+    pub fn step_volume(self: &Rc<Self>, delta: f64) {
+        let from = self.vol_target.get().unwrap_or(self.vol.value());
+        let to = (from + delta).clamp(0.0, MAX_VOLUME);
+        let start = self.vol.value();
+        let generation = self.vol_gen.get() + 1;
+        self.vol_gen.set(generation);
+        self.vol_target.set(Some(to));
+        for i in 1..=FADE_STEPS {
+            let me = self.clone();
+            glib::timeout_add_local_once(FADE_STEP * i, move || {
+                if me.vol_gen.get() != generation {
+                    return;
+                }
+                let v = start + (to - start) * i as f64 / FADE_STEPS as f64;
+                let _ = me.mpv.set_property("volume", v.round());
+                if i == FADE_STEPS {
+                    me.vol_target.set(None);
+                }
+            });
+        }
+    }
+
     /// Wird für jede beobachtete mpv-Eigenschaft aufgerufen, wenn sie sich ändert.
     pub fn update(self: &Rc<Self>, name: &str, data: PropertyData) {
         match (name, data) {
@@ -540,7 +630,10 @@ impl Controls {
                 self.vol.set_value(v);
                 save_volume(v);
             }
-            ("mute", PropertyData::Flag(m)) => self.mute.set_icon_name(if m { "tube-mute-symbolic" } else { "tube-volume-symbolic" }),
+            ("mute", PropertyData::Flag(m)) => {
+                self.muted.set(m);
+                self.mute.set_icon_name(if m { "tube-mute-symbolic" } else { "tube-volume-symbolic" });
+            }
             _ => {}
         }
     }
