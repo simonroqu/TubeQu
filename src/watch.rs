@@ -81,6 +81,8 @@ pub struct WatchPage {
     pub widget: gtk::Overlay,
     /// Alles unter dem Video; wird im Vollbild ausgeblendet.
     pub info: gtk::Box,
+    /// Graue Platzhalter in Form von `info` mit Glanz-Animation, solange die Details laden.
+    skeleton: gtk::Box,
     scroll: gtk::ScrolledWindow,
     player: gtk::Widget,
     title: gtk::Label,
@@ -110,6 +112,45 @@ pub struct WatchPage {
     channel_id: RefCell<Option<String>>,
 }
 
+/// Platzhalter für Titel, Kanalzeile und Beschreibung (style.css `.skeleton`), gleicher Aufbau wie `info`.
+/// Breite -1 = ganze Zeile. ponytail: feste Breiten nur klein (≤ 360 px), damit das Fenster schmal bleiben kann.
+fn skeleton() -> gtk::Box {
+    let bar = |w: i32, h: i32| {
+        gtk::Box::builder()
+            .width_request(w)
+            .height_request(h)
+            .halign(if w < 0 { gtk::Align::Fill } else { gtk::Align::Start })
+            .css_classes(["skeleton"])
+            .build()
+    };
+    let name_col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).valign(gtk::Align::Center).build();
+    name_col.append(&bar(160, 16));
+    name_col.append(&bar(100, 12));
+    let channel_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let circle = bar(40, 40);
+    circle.add_css_class("round");
+    channel_row.append(&circle);
+    channel_row.append(&name_col);
+    let desc = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).css_classes(["description-box"]).build();
+    for (w, h) in [(140, 16), (-1, 14), (-1, 14), (240, 14)] {
+        desc.append(&bar(w, h));
+    }
+    let b = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(12)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
+        .can_target(false)
+        .visible(false)
+        .build();
+    b.append(&bar(360, 26));
+    b.append(&channel_row);
+    b.append(&desc);
+    b
+}
+
 fn text(classes: &[&str]) -> gtk::Label {
     gtk::Label::builder().xalign(0.0).wrap(true).selectable(true).focusable(false).css_classes(classes.to_vec()).build()
 }
@@ -120,7 +161,7 @@ impl WatchPage {
     pub fn new(player: &impl IsA<gtk::Widget>, on_channel: Rc<dyn Fn(String)>, on_link: Rc<dyn Fn(String)>) -> Rc<Self> {
         let title = text(&["title-3"]);
 
-        let avatar = gtk::Image::builder().pixel_size(40).overflow(gtk::Overflow::Hidden).css_classes(["avatar"]).build();
+        let avatar = gtk::Image::builder().pixel_size(40).overflow(gtk::Overflow::Hidden).halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["avatar", "placeholder"]).build();
         let channel_name = gtk::Label::builder().xalign(0.0).css_classes(["heading"]).build();
         let channel = gtk::Button::builder()
             .child(&channel_name)
@@ -165,6 +206,8 @@ impl WatchPage {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(player);
         content.append(&info);
+        let skeleton = skeleton();
+        content.append(&skeleton);
         let scroll = gtk::ScrolledWindow::builder().child(&content).hscrollbar_policy(gtk::PolicyType::Never).build();
         crate::smooth::attach(&scroll);
 
@@ -177,6 +220,7 @@ impl WatchPage {
         let page = Rc::new(WatchPage {
             widget,
             info,
+            skeleton,
             scroll,
             player: player.clone().upcast(),
             title,
@@ -294,7 +338,10 @@ impl WatchPage {
     }
 
     fn update_info(&self) {
-        self.info.set_visible(self.ready.get() && !self.fullscreen.get() && !self.mini.get());
+        let below = !self.fullscreen.get() && !self.mini.get();
+        self.info.set_visible(self.ready.get() && below);
+        // Platzhalter nur, wenn Details kommen (YouTube-Video), nicht bei direkt abgespielten Adressen.
+        self.skeleton.set_visible(!self.ready.get() && below && !self.current.borrow().is_empty());
     }
 
     pub fn is_mini(&self) -> bool {

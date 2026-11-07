@@ -157,7 +157,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 - Buttons: **immer Icons, keine Beschriftung** (z. B. Reload = `tubequ-reload-symbolic`, nicht „Reload“);
   Erklärung nur als Tooltip. Kein Rahmen/Hintergrund, nur Hover-/Klick-Effekt. Eigene minimalistische
   Icons (`tubequ-*-symbolic`, 16×16, `fill="#000"`, GTK färbt sie in der Schriftfarbe), keine Emojis.
-- Laden = Spinner, kein Text. Spinner = `icons::spinner()` (gedrehtes Icon), **nie `gtk::Spinner`**:
+- Laden von Inhalten = graue Platzhalter in der Form des Inhalts mit Glanzstreifen (style.css `.skeleton`): Raster/Nachladen `grid.rs` `ghost_card` (Breiten über `part`, keine festen Pixel), Ansehen-Seite `watch.rs` `skeleton`, Kanalkopf `channel.rs` `ghost`. Sonst (Bubble, Player) Spinner, kein Text. Spinner = `icons::spinner()` (gedrehtes Icon), **nie `gtk::Spinner`**:
   der friert in GTK 4.24 nach einmal Ausblenden (auch Seitenwechsel) für immer ein.
 - Keine knalligen Farben (Sponsor-Bereiche dezent in Schriftfarbe, Abo-Symbol ohne YouTube-Rot).
 - Popover (z. B. Player-Einstellungen) in Theme-Farben, Auswahlpunkte in Akzentfarbe (`theme.rs`).
@@ -194,7 +194,8 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   10-MiB-Stücken (wie yt-dlp), sonst bremst YouTube auf Abspielgeschwindigkeit (mpv ≥ 0.42 macht
   das im ytdl_hook selbst, mpv 0.41 nicht). Vorgeladener Bereich hell in der Timeline
   (`demuxer-cache-time`); Spinner auch beim Puffern/Springen (nach 300 ms, kein Flackern).
-- Lautstärke-Angleich: `af=lavfi=[dynaudnorm=f=250:g=15:p=0.95]` (kein Startverzug, getestet).
+- Lautstärke-Angleich: `af=lavfi=[dynaudnorm=f=250:g=15:p=0.95]` (kein Startverzug, getestet). `TUBEQU_NO_NORM=1` schaltet ihn ab (Gegenprobe).
+- Kapitel (mpv `chapter-list`, ab 2 Stück): Timeline in Abschnitte mit Lücken wie bei YouTube. Die Schiene zeichnet dann `segment_layer` selbst (Klasse `chapters` am Regler macht trough/highlight per CSS unsichtbar; `chapter_spans`), der Abschnitt unter der Maus wird dicker; beim Überfahren steht der Kapiteltitel in der Vorschau.
 - Timeline-Vorschau: Storyboard aus dem yt-dlp-JSON (`storyboard_from_ytdlp`, größte Stufe),
   Bögen von i.ytimg.com nur beim Überfahren geladen (im RAM, pro Video), nicht über das Limit.
   Die Vorschau liegt als eigene Ebene im Player (nicht in der Leiste) und sitzt immer `PREVIEW_GAP` über der Schiene (`place_preview`).
@@ -218,8 +219,9 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 
 - Player: Doppelklick links/rechts = −/+10 s, Mitte = Vollbild; `+`/`-` = Lautstärke (Mausrad bewusst nicht); Einblendung
   mitten im Bild bei Sprung/Lautstärke/Ton/Tempo/Untertitel (nicht in den ersten 1,5 s nach `play`).
-  Tasten zusätzlich: `0`–`9` (0–90 %), `,`/`.` Bild für Bild, `c` Untertitel (nur de/en, auch
-  automatische; erst beim Einschalten geladen), `F5`/`Strg+R`/`R` Reload, `Strg+V` Link aus Zwischenablage.
+  Tasten zusätzlich: `0`–`9` (0–90 %), `Strg+←/→` voriges/nächstes Kapitel (`chapter_target`; ← in den ersten 3 s ins vorige, sonst an den Kapitelanfang; Titel wird eingeblendet; mehrfach schnell drücken springt durch, weil das Ziel des letzten Sprungs als Position gilt, solange mpv am Schlüsselbild davor steht: `chapter_pos`), `,`/`.` Bild für Bild, `c` bzw. Linksklick auf den Untertitel-Knopf = an/aus
+  (gewählte Sprache, Standard Englisch; `Controls::toggle_subs`/`pick_sub`), Rechtsklick = Menü mit Sprache (Spuren des
+  Videos, beim Öffnen gelesen), Größe und Hintergrund (Umriss/Kasten). Nur de/en, auch automatische; erst beim Einschalten geladen, `F5`/`Strg+R`/`R` Reload, `Strg+V` Link aus Zwischenablage.
 - Maus-Seitentasten (GTK-Knopf 8/9) = Zurück/Vor, überall im Fenster (`Nav::forward`, merkt nur die
   Seite, nicht deren Inhalt; neuer Weg oder Home leert „Vor“).
 - Geschwindigkeit pro Kanal gemerkt (`speeds.tsv`), sonst normal. Endbildschirm (Nochmal/Startseite).
@@ -228,7 +230,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   abgedunkelt. Scroll-Position bleibt beim Zurückkommen erhalten.
 - Nav-Bubble: Burger, Zurück, Home, Suche, Lade-Kreis; Burger klappt die Bubble nach unten auf (Watch later, Verlauf, Konto), Auswahl oder Klick daneben klappt zu. Kein Reload-Knopf. Klick auf den Knopf der Seite, auf der man ist, lädt sie neu.
 - Lade-Kreis in der Bubble: `crate::Busy::new()` in jeden Ladevorgang mitnehmen (Raster, Nachladen, Video-Details, Konten, Abo); Reload lässt das Alte stehen, bis das Neue da ist.
-- Ansehen-Seite: Infos unter dem Video erst sichtbar, wenn die Details da sind (vorher nur der Player, kein Spinner unten). Suchfeld zeigt beim Öffnen die letzte Suche (markiert); leer oder unverändert = Liste der letzten Suchen, keine Vorschlags-Anfrage.
+- Ansehen-Seite: Infos unter dem Video erst sichtbar, wenn die Details da sind; bis dahin graue Platzhalter in derselben Form (Titel, Profilbild-Kreis, Kanal, Beschreibung) mit durchlaufendem Glanzstreifen (`watch.rs` `skeleton`, style.css `.skeleton`), nicht bei direkt abgespielten Adressen. Kanal-Profilbilder haben bis zum Laden einen grauen Kreis (`.avatar.placeholder`). Suchfeld zeigt beim Öffnen die letzte Suche (markiert); leer oder unverändert = Liste der letzten Suchen, keine Vorschlags-Anfrage.
 - Weiches Scrollen mit dem Mausrad (`smooth.rs`, an jedem ScrolledWindow): Raststufen gleiten statt zu springen; Touchpad bleibt bei GTK.
 - Feinschliff (style.css, Ende): Vorschaubilder mit grauem Platzhalter (`.thumb-box`), Einblenden beim Laden (`.fade` → `.loaded`), Hover-Zoom 4 %; Ansehen-Seite blendet ein (`page-in-a/-b` im Wechsel, sonst startet die Animation nicht neu), Miniplayer gleitet in die Ecke (`.mini`).
 - Ton: Stummschalten blendet über den Filter `@fade` (lavfi `volume`, per `af-command`) in 160 ms aus/ein, `+`/`-` ändern die Lautstärke in kleinen Schritten (`Controls::toggle_mute`/`step_volume`). `af-command` meldet trotzdem einen Fehler (Ziel „all“ trifft auch Filter ohne den Befehl), wirkt aber.
@@ -244,12 +246,14 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 - `~/.local/share/tubequ/later.jsonl` – Watch later (neueste zuerst; fertig Geschautes fliegt raus)
 - `~/.local/share/tubequ/searches.txt` – letzte 8 Suchen; `speeds.tsv` – Tempo pro Kanal
 - `~/.config/tubequ/quality` – gewählte Qualität (Standard 1080)
+- `~/.config/tubequ/subtitles` – Untertitel: Sprache, Größe (`sub-font-size`), `box`/`outline` (je eine Zeile)
 - `~/.config/tubequ/volume` – Lautstärke 0–200 (Standard 100 = Regler in der Mitte, `MAX_VOLUME`, mpv `volume-max`), bei jeder Änderung gespeichert
 - `~/.config/tubequ/player-width` / `columns` – mit Strg+Mausrad gewählte Player-Breite / Spaltenzahl
 - `~/.config/tubequ/account` – Nummer des Google-Kontos im Browser (Standard 0)
 - `~/.cache/tubequ/home.jsonl` – letzte Startseite (sofort beim Start)
 - `~/.cache/tubequ/accounts.tsv` – bekannte Konten (Nummer, Name, E-Mail, Profilbild-URL)
 - `~/.cache/tubequ/requests.txt` – Zeitpunkte der YouTube-Anfragen der letzten Stunde (Limit)
+- `~/.cache/tubequ/crash.log` – Panik-Meldung + Backtrace (Hook in `main`), erste Anlaufstelle bei Abstürzen
 - `~/.cache/tubequ/cookies.tmp` – nur kurz während einer innertube-Anfrage, danach gelöscht
 - `~/.cache/tubequ/` – rustypipe-Cache, `thumbs/` (auch Avatare/Profilbilder), `icons/`, `rustypipe_reports/`
 - Omarchy-Theme gelesen aus `~/.local/state/omarchy/current/theme/` (`colors.toml`, `hyprland.lua`)

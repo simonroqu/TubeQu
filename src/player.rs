@@ -100,10 +100,17 @@ fn report(mpv: &Mpv, track: &RefCell<Track>, wait: bool) {
         }
     };
     if wait {
-        let _ = crate::RT.block_on(tokio::time::timeout(Duration::from_secs(3), fut));
+        wait_at_most(Duration::from_secs(3), fut);
     } else {
         crate::RT.spawn(fut);
     }
+}
+
+/// Blockiert, bis `fut` fertig ist, höchstens `limit`. Der Timer muss *im* `block_on` entstehen:
+/// `timeout()` braucht schon beim Anlegen die Tokio-Runtime, im GTK-Thread gibt es keine (Panik
+/// „no reactor running“ → Absturz beim Schließen/Zurück).
+fn wait_at_most(limit: Duration, fut: impl std::future::Future<Output = ()>) {
+    let _ = crate::RT.block_on(async move { tokio::time::timeout(limit, fut).await });
 }
 
 /// Zeigt eine Meldung über dem Video (rot, wenn `error`); `retry` = darunter Reload-Icon anbieten.
@@ -190,7 +197,9 @@ impl Player {
                 i.set_property("stream-lavf-o", "request_size=10485760")?;
                 // Lautstärke angleichen (YouTube normalisiert, mpv nicht): sanft, großes Zeitfenster gegen
                 // „Pumpen“. Kein spürbarer Startverzug (getestet).
-                i.set_property("af", "lavfi=[dynaudnorm=f=250:g=15:p=0.95],@fade:lavfi=[volume=1]")?;
+                // ponytail: TUBEQU_NO_NORM=1 schaltet den Angleich ab (Gegenprobe bei Lautstärke-Spitzen).
+                let norm = if std::env::var_os("TUBEQU_NO_NORM").is_some() { "" } else { "lavfi=[dynaudnorm=f=250:g=15:p=0.95]," };
+                i.set_property("af", format!("{norm}@fade:lavfi=[volume=1]"))?;
                 // Untertitel: auch automatische, aber nur Deutsch/Englisch (sonst ~100 Übersetzungen).
                 // Geladen wird eine Spur erst beim Einschalten (Taste c) – keine Extra-Anfrage beim Start.
                 // Wert ohne Komma: mpv trennt die Optionen an Kommas.
@@ -328,6 +337,14 @@ impl Player {
             }
         });
         area.add_controller(click);
+        controls.subtitles.connect_clicked({
+            let (controls, flash) = (controls.clone(), flash.clone());
+            move |_| {
+                if !controls.toggle_subs() {
+                    toast(&flash, "No subtitles");
+                }
+            }
+        });
 
         // Mausbewegung über dem Video blendet die Leiste ein.
         let motion = gtk::EventControllerMotion::new();
@@ -681,10 +698,22 @@ impl Player {
         true
     }
 
+    /// Strg+→/←: nächstes/voriges Kapitel, mit Einblendung des Titels.
+    pub fn chapter(&self, dir: i32) {
+        match self.controls.chapter_jump(dir) {
+            Some(t) if !t.is_empty() => toast(&self.flash, &t),
+            Some(_) => {}
+            None if self.controls.has_chapters() => {}
+            None => toast(&self.flash, "No chapters"),
+        }
+        self.controls.poke();
+    }
+
     /// Tastenkürzel wie bei YouTube. Gibt `true` zurück, wenn die Taste verwendet wurde.
     pub fn key(&self, key: gdk::Key) -> bool {
         // Sprünge mit Einblendung; Lautstärke/Ton/Tempo blenden über ihre Ereignisse ein.
         let jump = |s: i32| {
+            self.controls.forget_chapter_jump();
             let _ = self.mpv.command("seek", &[&s.to_string()]);
             toast(&self.flash, &if s < 0 { format!("−{} s", -s) } else { format!("+{s} s") });
             self.controls.poke();
@@ -692,6 +721,7 @@ impl Player {
         };
         // 0–9: an 0–90 % springen (wie bei YouTube).
         if let Some(d) = key.to_unicode().and_then(|c| c.to_digit(10)) {
+            self.controls.forget_chapter_jump();
             let _ = self.mpv.command("seek", &[&(d * 10).to_string(), "absolute-percent"]);
             self.controls.poke();
             return true;
@@ -721,7 +751,13 @@ impl Player {
             // Bild für Bild (bei Pause), wie bei YouTube.
             gdk::Key::comma => &["frame-back-step"],
             gdk::Key::period => &["frame-step"],
-            gdk::Key::c => &["cycle", "sub"],
+            gdk::Key::c => {
+                if !self.controls.toggle_subs() {
+                    toast(&self.flash, "No subtitles");
+                }
+                self.controls.poke();
+                return true;
+            }
             // Lautstärke: + / - (auch Ziffernblock) und Pfeile hoch/runter.
             gdk::Key::greater => return self.speed(1),
             gdk::Key::less => return self.speed(-1),
@@ -736,6 +772,15 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::reason;
+
+    #[test]
+    fn wait_outside_runtime() {
+        // Normaler Test-Thread ohne Tokio-Kontext, wie der GTK-Thread.
+        let t = std::time::Instant::now();
+        super::wait_at_most(std::time::Duration::from_millis(50), std::future::pending());
+        assert!(t.elapsed() >= std::time::Duration::from_millis(50));
+        super::wait_at_most(std::time::Duration::from_secs(5), async {});
+    }
 
     fn l(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

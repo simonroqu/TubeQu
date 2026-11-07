@@ -15,6 +15,8 @@ pub struct ChannelPage {
     avatar: gtk::Image,
     name: gtk::Label,
     subscribers: gtk::Label,
+    /// Graue Balken statt Name/Abonnenten, bis die Kanal-Infos da sind (style.css `.skeleton`).
+    ghost: gtk::Box,
     sub: gtk::Button,
     id: RefCell<String>,
 }
@@ -32,7 +34,7 @@ fn show_sub(sub: &gtk::Button, on: bool) {
 
 impl ChannelPage {
     pub fn new(on_play: impl Fn(Video) + 'static) -> Rc<Self> {
-        let avatar = gtk::Image::builder().pixel_size(64).overflow(gtk::Overflow::Hidden).css_classes(["avatar"]).build();
+        let avatar = gtk::Image::builder().pixel_size(64).overflow(gtk::Overflow::Hidden).halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["avatar", "placeholder"]).build();
         let name = gtk::Label::builder().xalign(0.0).css_classes(["title-2"]).build();
 
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 16);
@@ -42,6 +44,11 @@ impl ChannelPage {
         let name_col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).valign(gtk::Align::Center).build();
         name_col.append(&name);
         name_col.append(&subscribers);
+        let ghost = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).valign(gtk::Align::Center).visible(false).build();
+        for (w, h) in [(220, 28), (120, 12)] {
+            ghost.append(&gtk::Box::builder().width_request(w).height_request(h).halign(gtk::Align::Start).css_classes(["skeleton"]).build());
+        }
+        top.append(&ghost);
         top.append(&name_col);
         // Nur mit Browser-Login; ohne Login kann YouTube kein Abo zuordnen.
         let sub = gtk::Button::builder().focusable(false).valign(gtk::Align::Center).css_classes(["flat"]).visible(youtube::COOKIES.is_some()).build();
@@ -74,7 +81,7 @@ impl ChannelPage {
         widget.append(&header);
         widget.append(&grid.widget);
 
-        let me = Rc::new(ChannelPage { widget, grid, avatar, name, subscribers, sub, id: RefCell::default() });
+        let me = Rc::new(ChannelPage { widget, grid, avatar, name, subscribers, ghost, sub, id: RefCell::default() });
         page.replace(Some(Rc::downgrade(&me)));
 
         let weak = Rc::downgrade(&me);
@@ -109,6 +116,7 @@ impl ChannelPage {
         self.name.set_text("");
         self.subscribers.set_text("");
         self.avatar.clear();
+        self.ghost.set_visible(true);
         self.load();
     }
 
@@ -121,11 +129,13 @@ impl ChannelPage {
             let (tx, rx) = async_channel::bounded::<ChannelInfo>(1);
             let weak = weak.clone();
             glib::spawn_future_local(async move {
-                if let Ok(info) = rx.recv().await
-                    && let Some(me) = weak.upgrade()
-                    && *me.id.borrow() == info.id
-                {
-                    me.set_info(info);
+                let info = rx.recv().await;
+                let Some(me) = weak.upgrade() else { return };
+                match info {
+                    Ok(info) if *me.id.borrow() == info.id => me.set_info(info),
+                    Ok(_) => {}
+                    // Anfrage gescheitert (Sender weg): Platzhalter nicht ewig stehen lassen.
+                    Err(_) => me.ghost.set_visible(false),
                 }
             });
             let id = id.clone();
@@ -143,6 +153,7 @@ impl ChannelPage {
     }
 
     fn set_info(&self, info: ChannelInfo) {
+        self.ghost.set_visible(false);
         self.name.set_text(&info.name);
         self.subscribers.set_text(&info.subscribers.map(|n| format!("{} subscribers", crate::grid::fmt_views(n))).unwrap_or_default());
         if let Some(url) = info.avatar {

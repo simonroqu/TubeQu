@@ -180,6 +180,30 @@ fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk
     (b, bar, pic)
 }
 
+/// Lade-Platzhalter in Form einer Karte: Vorschaubild, Titel, Kanal, Aufrufe (style.css `.skeleton`).
+/// Gibt auch den Bild-Platzhalter zurück: seine Höhe folgt wie bei echten Karten der Spaltenbreite (`fit`).
+fn ghost_card(width: i32) -> (gtk::Box, gtk::Box) {
+    let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+    let thumb = gtk::Box::builder().height_request(thumb_height(width)).css_classes(["skeleton"]).build();
+    b.append(&thumb);
+    b.append(&part(4, 5, 16));
+    b.append(&part(1, 2, 12));
+    b.append(&part(1, 3, 12));
+    (b, thumb)
+}
+
+/// Grauer Balken über `k` von `n` gleich breiten Teilen der Zeile – ohne feste Pixelbreite,
+/// die dem Fenster eine Mindestbreite aufzwänge.
+fn part(k: i32, n: i32, height: i32) -> gtk::Grid {
+    let g = gtk::Grid::builder().column_homogeneous(true).build();
+    g.attach(&gtk::Box::builder().height_request(height).css_classes(["skeleton"]).build(), 0, 0, k, 1);
+    // Jede freie Spalte braucht ein Kind, sonst zählt sie bei gleich breiten Spalten nicht mit.
+    for i in k..n {
+        g.attach(&gtk::Box::new(gtk::Orientation::Horizontal, 0), i, 0, 1, 1);
+    }
+    g
+}
+
 fn load_thumb(pic: &gtk::Picture, id: String) {
     // Unsichtbar bis zum Laden, dann einblenden (style.css `.fade`).
     pic.add_css_class("fade");
@@ -289,9 +313,11 @@ pub struct Grid {
     shelf: gtk::Box,
     shelf_cards: gtk::Box,
     status: gtk::Label,
-    spinner: gtk::Image,
+    /// Graue Platzhalter-Karten beim Laden (oben) und beim Nachladen (unten).
+    ghost: gtk::FlowBox,
     footer: gtk::Label,
-    footer_spinner: gtk::Image,
+    footer_ghost: gtk::FlowBox,
+    ghost_thumbs: RefCell<Vec<gtk::Box>>,
     on_play: Rc<dyn Fn(Video)>,
     on_channel: Rc<dyn Fn(String)>,
     videos: RefCell<Vec<Video>>,
@@ -336,11 +362,17 @@ impl Grid {
         // ponytail: FlowBox baut alle Karten; bei mehreren hundert Videos auf GridView umstellen.
         let top = flowbox();
         let rest = flowbox();
-        // Laden: nur ein Spinner. Die Labels zeigen nur Fehler oder „keine Ergebnisse“.
+        // Laden: graue Platzhalter-Karten. Die Labels zeigen nur Fehler oder „keine Ergebnisse“.
         let status = gtk::Label::builder().visible(false).margin_top(48).build();
-        let spinner = crate::icons::spinner(32).margin_top(48).visible(false).build();
+        let ghost = flowbox();
+        ghost.set_can_target(false);
+        ghost.set_visible(false);
         let footer = gtk::Label::builder().visible(false).margin_top(12).margin_bottom(24).css_classes(["dim-label"]).build();
-        let footer_spinner = crate::icons::spinner(16).margin_top(12).margin_bottom(24).visible(false).build();
+        let footer_ghost = flowbox();
+        footer_ghost.set_can_target(false);
+        footer_ghost.set_visible(false);
+        footer_ghost.set_margin_top(24);
+        footer_ghost.set_margin_bottom(24);
 
         // „Weiterschauen“: Überschrift und eine waagerecht scrollbare Reihe.
         // Gleich breite Plätze, einer pro Rasterspalte (leere Plätze füllt `layout` auf): so sind die Karten
@@ -377,12 +409,12 @@ impl Grid {
             .margin_start(16)
             .margin_end(16)
             .build();
-        content.append(&spinner);
+        content.append(&ghost);
         content.append(&status);
         content.append(&top);
         content.append(&shelf);
         content.append(&rest);
-        content.append(&footer_spinner);
+        content.append(&footer_ghost);
         content.append(&footer);
         let scroll = gtk::ScrolledWindow::builder()
             .child(&content)
@@ -410,9 +442,10 @@ impl Grid {
             shelf,
             shelf_cards,
             status,
-            spinner,
+            ghost,
             footer,
-            footer_spinner,
+            footer_ghost,
+            ghost_thumbs: RefCell::default(),
             on_play: Rc::new(on_play),
             on_channel: Rc::new(on_channel),
             videos: RefCell::default(),
@@ -590,6 +623,9 @@ impl Grid {
             for pic in self.pics.borrow().iter().chain(self.shelf_pics.borrow().iter()) {
                 pic.set_height_request(thumb_height(col_width));
             }
+            for t in self.ghost_thumbs.borrow().iter() {
+                t.set_height_request(thumb_height(col_width));
+            }
         }
         if cols != self.columns.get() {
             self.columns.set(cols);
@@ -679,15 +715,16 @@ impl Grid {
         self.clear();
         self.footer.set_visible(false);
         self.status.set_visible(false);
+        // Platzhalter einer abgelösten Anfrage weg (deren Antwort wird verworfen und räumt nicht mehr auf).
+        self.hide_ghost(&self.ghost);
+        self.hide_ghost(&self.footer_ghost);
         self.scroll.vadjustment().set_value(0.0);
         self.loading.set(true);
-        // Gespeichertes sofort zeigen (kein Spinner); sonst Spinner bis zur Antwort.
+        // Gespeichertes sofort zeigen; sonst Platzhalter-Karten bis zur Antwort.
         let has_saved = saved.is_some();
         match saved {
             Some(p) => self.append(p),
-            None => {
-                self.spinner.set_visible(true);
-            }
+            None => self.show_ghost(&self.ghost, None),
         }
 
         let grid = self.clone();
@@ -699,7 +736,7 @@ impl Grid {
                 return;
             }
             grid.loading.set(false);
-            grid.spinner.set_visible(false);
+            grid.hide_ghost(&grid.ghost);
             match res {
                 Ok(p) if p.videos.is_empty() && !has_saved => grid.message("No results"),
                 Ok(p) if p.videos.is_empty() => {}
@@ -711,6 +748,34 @@ impl Grid {
                 Err(e) => grid.message(&format!("Error: {e}")),
             }
         });
+    }
+
+    /// Platzhalter-Karten in `flow` (Spaltenzahl und -breite wie das Raster). `rows` = None: so viele
+    /// Reihen, dass die sichtbare Höhe gefüllt ist.
+    fn show_ghost(&self, flow: &gtk::FlowBox, rows: Option<usize>) {
+        let (cols, width) = (self.columns.get(), self.column_width.get());
+        // ponytail: ~90 px Text unter dem Bild + Reihenabstand geschätzt.
+        // Beim App-Start hat das Fenster noch keine Höhe: dann 4 Reihen.
+        let h = self.scroll.height();
+        let rows = rows.unwrap_or(if h > 0 { (h / (thumb_height(width) + 90).max(1)) as usize + 1 } else { 4 }).max(2);
+        flow.set_min_children_per_line(cols as u32);
+        flow.set_max_children_per_line(cols as u32);
+        flow.remove_all();
+        for _ in 0..rows * cols {
+            let (card, thumb) = ghost_card(width);
+            flow.append(&card);
+            self.ghost_thumbs.borrow_mut().push(thumb);
+        }
+        flow.set_visible(true);
+    }
+
+    fn hide_ghost(&self, flow: &gtk::FlowBox) {
+        flow.remove_all();
+        flow.set_visible(false);
+        // Nur leeren, wenn beide weg sind (sonst gehen die Bildhöhen des anderen verloren).
+        if !self.ghost.is_visible() && !self.footer_ghost.is_visible() {
+            self.ghost_thumbs.borrow_mut().clear();
+        }
     }
 
     fn message(&self, text: &str) {
@@ -739,7 +804,7 @@ impl Grid {
         let Some(m) = self.next.take() else { return };
         self.loading.set(true);
         self.footer.set_visible(false);
-        self.footer_spinner.set_visible(true);
+        self.show_ghost(&self.footer_ghost, Some(1));
 
         let generation = self.generation.get();
         let grid = self.clone();
@@ -751,7 +816,7 @@ impl Grid {
                 return;
             }
             grid.loading.set(false);
-            grid.footer_spinner.set_visible(false);
+            grid.hide_ghost(&grid.footer_ghost);
             match res {
                 Ok(p) => grid.append(p),
                 Err(e) => {

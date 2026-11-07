@@ -161,10 +161,6 @@ scale.timeline slider {
   border-radius: 9999px;
 }
 
-/* Kapitel-Striche unter der Timeline dezent in Weiß. */
-scale.timeline marks indicator {
-  color: rgba(255, 255, 255, 0.5);
-}
 
 /* Gefüllter Teil von Timeline und Lautstärke: schlicht weiß statt Signalfarbe. */
 .bubble scale highlight,
@@ -172,6 +168,14 @@ scale.timeline highlight {
   background: white;
   border: none;
   margin: 0;
+}
+
+/* Video mit Kapiteln: Schiene und gespielter Teil zeichnet controls.rs (`segment_layer`) selbst, in
+   Abschnitten mit Lücken. Die eingebauten bleiben nur als unsichtbare Fläche für Klicks/Ziehen. */
+scale.timeline.chapters trough,
+scale.timeline.chapters highlight {
+  background: transparent;
+  box-shadow: none;
 }
 
 /* ---------- Schwebende Navigation oben links ---------- */
@@ -320,4 +324,29 @@ flowboxchild:focus-visible {
 
 .mini {
   animation: mini-in 250ms ease-out;
+}
+
+/* Lade-Platzhalter der Ansehen-Seite (watch.rs `skeleton`): graue Blöcke in Form der Infos,
+   ein heller Streifen läuft von links nach rechts durch. */
+@keyframes tubequ-shimmer {
+  from { background-position: -150% 0; }
+  to { background-position: 250% 0; }
+}
+
+.skeleton {
+  border-radius: var(--radius-s);
+  background-color: alpha(currentColor, 0.08);
+  background-image: linear-gradient(90deg, transparent, alpha(currentColor, 0.12), transparent);
+  background-size: 50% 100%;
+  background-repeat: no-repeat;
+  animation: tubequ-shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton.round {
+  border-radius: 9999px;
+}
+
+/* Kanal-Profilbild (Ansehen-Seite, Kanalseite): grauer Kreis, bis es geladen ist. */
+.avatar.placeholder {
+  background: alpha(currentColor, 0.08);
 }

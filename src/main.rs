@@ -766,6 +766,11 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 reload_page();
                 return glib::Propagation::Stop;
             }
+            // Strg+←/→: voriges/nächstes Kapitel (wie YouTube).
+            if mods == gdk::ModifierType::CONTROL_MASK && matches!(key, gdk::Key::Left | gdk::Key::Right) && nav.current() == "watch" {
+                player.chapter(if key == gdk::Key::Right { 1 } else { -1 });
+                return glib::Propagation::Stop;
+            }
             // Shift ist erlaubt (">" braucht es auf deutschen Tastaturen), andere Modifier nicht.
             if !(mods - gdk::ModifierType::SHIFT_MASK).is_empty() {
                 return glib::Propagation::Proceed;
@@ -869,6 +874,18 @@ thread_local! {
 fn main() -> glib::ExitCode {
     // libmpv verlangt LC_NUMERIC=C; ohne setlocale durch GTK bleibt alles auf C.
     gtk::disable_setlocale();
+    // Panik-Meldung zusätzlich in ~/.cache/tubequ/crash.log: aus dem Startmenü gestartet geht stderr
+    // verloren, und Paniken in GTK-Callbacks beenden die App sofort (abort).
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/tubequ/crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let _ = writeln!(f, "--- {now}\n{info}\n{}", std::backtrace::Backtrace::force_capture());
+        }
+        default_hook(info);
+    }));
     let app = gtk::Application::builder()
         .application_id("dev.tubequ.Tubequ")
         .flags(if std::env::var_os("TUBEQU_DEV").is_some() {

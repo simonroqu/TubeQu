@@ -81,6 +81,136 @@ pub fn speed_label(s: f64) -> String {
     if s == 1.0 { "Normal".into() } else { format!("{s}×") }
 }
 
+/// Untertitel-Schriftgrößen (mpv `sub-font-size`, Standard 38).
+const SUB_SIZES: [(i64, &str); 4] = [(30, "Small"), (38, "Normal"), (48, "Large"), (60, "Huge")];
+
+/// Untertitel-Einstellungen in `~/.config/tubequ/subtitles`, je eine Zeile: Sprache, Größe, Hintergrund.
+#[derive(Debug, PartialEq)]
+struct SubPrefs {
+    lang: String,
+    size: i64,
+    boxed: bool,
+}
+
+impl SubPrefs {
+    fn parse(s: &str) -> Self {
+        let mut l = s.lines().map(str::trim);
+        let lang = l.next().filter(|x| !x.is_empty()).unwrap_or("en").to_string();
+        let size = l.next().and_then(|x| x.parse().ok()).filter(|v| SUB_SIZES.iter().any(|(s, _)| s == v)).unwrap_or(38);
+        SubPrefs { lang, size, boxed: l.next() == Some("box") }
+    }
+
+    fn load() -> Self {
+        Self::parse(&std::fs::read_to_string(config_file("subtitles")).unwrap_or_default())
+    }
+
+    fn save(&self) {
+        let f = config_file("subtitles");
+        let _ = std::fs::create_dir_all(f.parent().unwrap());
+        let _ = std::fs::write(f, format!("{}\n{}\n{}\n", self.lang, self.size, if self.boxed { "box" } else { "outline" }));
+    }
+
+    fn apply(&self, mpv: &Mpv) {
+        let _ = mpv.set_property("sub-font-size", self.size);
+        let _ = mpv.set_property("sub-border-style", if self.boxed { "background-box" } else { "outline-and-shadow" });
+    }
+}
+
+/// Untertitelspuren des Videos: (mpv-ID, Sprache). Nur bei Klicks abgefragt, nicht in Ereignissen.
+fn sub_tracks(mpv: &Mpv) -> Vec<(i64, String)> {
+    let n = mpv.get_property::<i64>("track-list/count").unwrap_or(0);
+    (0..n)
+        .filter(|i| mpv.get_property::<String>(&format!("track-list/{i}/type")).is_ok_and(|t| t == "sub"))
+        .filter_map(|i| {
+            let id = mpv.get_property::<i64>(&format!("track-list/{i}/id")).ok()?;
+            Some((id, mpv.get_property::<String>(&format!("track-list/{i}/lang")).unwrap_or_default()))
+        })
+        .collect()
+}
+
+/// Spur für die gewünschte Sprache: genau diese, sonst gleiche Grundsprache (en-US, en-orig),
+/// sonst Englisch, sonst die erste.
+fn pick_sub(tracks: &[(i64, String)], lang: &str) -> Option<i64> {
+    let base = |l: &str| l.split('-').next().unwrap_or(l).to_string();
+    tracks
+        .iter()
+        .find(|(_, l)| l == lang)
+        .or_else(|| tracks.iter().find(|(_, l)| base(l) == base(lang)))
+        .or_else(|| tracks.iter().find(|(_, l)| base(l) == "en"))
+        .or(tracks.first())
+        .map(|(id, _)| *id)
+}
+
+/// „en“ → „English“, „en-orig“ → „English (en-orig)“.
+fn lang_label(l: &str) -> String {
+    let name = match l.split('-').next() {
+        Some("en") => "English",
+        Some("de") => "German",
+        _ => return if l.is_empty() { "Unknown".into() } else { l.to_string() },
+    };
+    if l.contains('-') { format!("{name} ({l})") } else { name.to_string() }
+}
+
+/// Lücke zwischen den Kapitel-Abschnitten der Timeline (px) und wie viel dicker der Abschnitt unter der Maus wird.
+const CHAPTER_GAP: f64 = 3.0;
+const CHAPTER_HOVER_GROW: f64 = 2.0;
+/// Strg+← springt an den Anfang des aktuellen Kapitels; nur in den ersten Sekunden ins vorige (wie YouTube/mpv).
+const CHAPTER_BACK_THRESHOLD: f64 = 3.0;
+
+/// So lange (s) gilt das Ziel des letzten Kapitelsprungs als Position, solange mpv noch davor steht
+/// (höchstens `CHAPTER_KEYFRAME_GAP` davor: so weit kann das Schlüsselbild vor dem Kapitelanfang liegen).
+const CHAPTER_JUMP_HOLD: f64 = 15.0;
+const CHAPTER_KEYFRAME_GAP: f64 = 12.0;
+
+/// Position für den nächsten Kapitelsprung. Gesprungen wird zum Schlüsselbild (`hr-seek=no`), das liegt oft
+/// ein paar Sekunden vor dem Kapitelanfang, also noch im alten Kapitel. Ohne Ausgleich zielte der nächste
+/// Druck wieder auf dasselbe Kapitel. `last` = (Ziel des letzten Sprungs, Sekunden seitdem).
+fn chapter_pos(pos: f64, last: Option<(f64, f64)>) -> f64 {
+    match last {
+        Some((target, age)) if age < CHAPTER_JUMP_HOLD && pos < target && target - pos < CHAPTER_KEYFRAME_GAP => target,
+        _ => pos,
+    }
+}
+
+/// Ziel-Kapitel (Index) für Strg+→ (`dir` > 0) bzw. Strg+← (`dir` < 0) von `pos` aus.
+fn chapter_target(chapters: &[(f64, String)], pos: f64, dir: i32) -> Option<usize> {
+    let cur = chapters.iter().rposition(|(start, _)| *start <= pos)?;
+    if dir > 0 {
+        return (cur + 1 < chapters.len()).then_some(cur + 1);
+    }
+    if pos - chapters[cur].0 > CHAPTER_BACK_THRESHOLD { Some(cur) } else { cur.checked_sub(1).or(Some(0)) }
+}
+
+/// Abschnitte der Timeline in Pixeln (`x0`, `x1`) bei Kapiteln: eine Lücke an jeder Kapitelgrenze.
+fn chapter_spans(chapters: &[(f64, String)], dur: f64, left: f64, width: f64) -> Vec<(f64, f64)> {
+    let x_at = |t: f64| left + width * (t / dur).clamp(0.0, 1.0);
+    let starts: Vec<f64> = chapters.iter().map(|(s, _)| *s).filter(|s| *s > 0.0 && *s < dur).collect();
+    let mut edges = vec![left];
+    edges.extend(starts.iter().map(|s| x_at(*s)));
+    edges.push(left + width);
+    edges
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| {
+            let x0 = if i == 0 { w[0] } else { w[0] + CHAPTER_GAP / 2.0 };
+            let x1 = if i + 2 == edges.len() { w[1] } else { w[1] - CHAPTER_GAP / 2.0 };
+            (x0, x1.max(x0))
+        })
+        .collect()
+}
+
+/// Rechteck mit runden Ecken als Pfad.
+fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    let pi = std::f64::consts::PI;
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -pi / 2.0, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, pi / 2.0);
+    cr.arc(x + r, y + h - r, r, pi / 2.0, pi);
+    cr.arc(x + r, y + r, r, pi, 1.5 * pi);
+    cr.close_path();
+}
+
 /// Kapitel, in dem `pos` liegt (Kapitel sind nach Startzeit sortiert).
 fn chapter_at(chapters: &[(f64, String)], pos: f64) -> Option<&str> {
     chapters.iter().rev().find(|(start, _)| *start <= pos).map(|(_, t)| t.as_str())
@@ -98,6 +228,10 @@ pub struct Controls {
     vol: gtk::Scale,
     pub mute: gtk::Button,
     settings: gtk::MenuButton,
+    /// Linksklick/Taste c: an/aus; Rechtsklick: Menü mit Sprache und Aussehen (`sub_menu`).
+    pub subtitles: gtk::Button,
+    sub_menu: gtk::Popover,
+    sub_prefs: Rc<RefCell<SubPrefs>>,
     speed_buttons: Vec<(f64, gtk::CheckButton)>,
     /// Bekommt beim Ausblenden einen unsichtbaren Mauszeiger.
     cursor_target: gtk::Widget,
@@ -123,6 +257,8 @@ pub struct Controls {
     vol_target: Cell<Option<f64>>,
     live: Cell<bool>,
     paused: Cell<bool>,
+    /// Ziel und Zeitpunkt des letzten Kapitelsprungs (siehe `chapter_pos`).
+    last_chapter_jump: Cell<Option<(f64, std::time::Instant)>>,
 }
 
 fn icon_button(icon: &str, tip: &str) -> gtk::Button {
@@ -282,11 +418,73 @@ impl Controls {
         buttons.append(&bubble(&[mute.upcast_ref(), vol.upcast_ref()]));
         buttons.append(&bubble(&[time.upcast_ref()]));
         buttons.append(&gtk::Box::builder().hexpand(true).build());
-        // Untertitel durchschalten (wie Taste c); die Sprache blendet der Player ein.
-        let subtitles = icon_button("tubequ-subtitles-symbolic", "Subtitles (c)");
-        subtitles.connect_clicked(move |_| {
-            let _ = mpv.command("cycle", &["sub"]);
+        // Untertitel: Linksklick an/aus (verbunden in player.rs, wegen der Einblendung), Rechtsklick = Menü.
+        let subtitles = icon_button("tubequ-subtitles-symbolic", "Subtitles (c) · right-click for options");
+        let sub_prefs = Rc::new(RefCell::new(SubPrefs::load()));
+        sub_prefs.borrow().apply(mpv);
+        let sub_tracks_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let (size_col, size_buttons) = radio_column("Size", &SUB_SIZES.map(|(_, l)| l.to_string()));
+        let (style_col, style_buttons) = radio_column("Background", &["Outline".to_string(), "Box".to_string()]);
+        for ((size, _), b) in SUB_SIZES.iter().zip(&size_buttons) {
+            b.set_active(*size == sub_prefs.borrow().size);
+            let (size, prefs) = (*size, sub_prefs.clone());
+            b.connect_toggled(move |b| {
+                if b.is_active() {
+                    prefs.borrow_mut().size = size;
+                    prefs.borrow().apply(mpv);
+                    prefs.borrow().save();
+                }
+            });
+        }
+        for (boxed, b) in [false, true].into_iter().zip(&style_buttons) {
+            b.set_active(boxed == sub_prefs.borrow().boxed);
+            let prefs = sub_prefs.clone();
+            b.connect_toggled(move |b| {
+                if b.is_active() {
+                    prefs.borrow_mut().boxed = boxed;
+                    prefs.borrow().apply(mpv);
+                    prefs.borrow().save();
+                }
+            });
+        }
+        let sub_menu_box = gtk::Box::builder().spacing(24).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
+        sub_menu_box.append(&sub_tracks_box);
+        sub_menu_box.append(&size_col);
+        sub_menu_box.append(&style_col);
+        let sub_menu = gtk::Popover::builder().child(&sub_menu_box).position(gtk::PositionType::Top).build();
+        sub_menu.set_parent(&subtitles);
+        let right = gtk::GestureClick::builder().button(3).build();
+        right.connect_pressed({
+            let (menu, holder, prefs) = (sub_menu.clone(), sub_tracks_box.clone(), sub_prefs.clone());
+            move |_, _, _, _| {
+                // Spuren erst beim Öffnen lesen: jedes Video hat andere.
+                while let Some(c) = holder.first_child() {
+                    holder.remove(&c);
+                }
+                let tracks = sub_tracks(mpv);
+                if tracks.is_empty() {
+                    holder.append(&gtk::Label::builder().label("No subtitles for this video").css_classes(["dim-label"]).build());
+                } else {
+                    let labels: Vec<String> = tracks.iter().map(|(_, l)| lang_label(l)).collect();
+                    let (col, buttons) = radio_column("Language", &labels);
+                    let current = mpv.get_property::<i64>("sid").ok();
+                    for ((id, lang), b) in tracks.into_iter().zip(&buttons) {
+                        b.set_active(Some(id) == current);
+                        let prefs = prefs.clone();
+                        b.connect_toggled(move |b| {
+                            if b.is_active() {
+                                let _ = mpv.set_property("sid", id);
+                                prefs.borrow_mut().lang = lang.clone();
+                                prefs.borrow().save();
+                            }
+                        });
+                    }
+                    holder.append(&col);
+                }
+                menu.popup();
+            }
         });
+        subtitles.add_controller(right);
         buttons.append(&bubble(&[subtitles.upcast_ref(), settings.upcast_ref(), fullscreen.upcast_ref()]));
 
         // Vorschau über der Timeline (Bild + Zeit), folgt der Maus. Liegt in der Leiste über dem Balken;
@@ -321,8 +519,10 @@ impl Controls {
         let segments: Rc<RefCell<Vec<Segment>>> = Rc::default();
         let cached_until: Rc<Cell<f64>> = Rc::default();
         let segment_layer = gtk::DrawingArea::builder().can_target(false).build();
+        // Mausposition über der Timeline (für den dickeren Kapitel-Abschnitt).
+        let hover_x: Rc<Cell<Option<f64>>> = Rc::default();
         segment_layer.set_draw_func({
-            let (segments, cached_until, seek) = (segments.clone(), cached_until.clone(), seek.downgrade());
+            let (segments, cached_until, seek, chapters, hover_x) = (segments.clone(), cached_until.clone(), seek.downgrade(), chapters.clone(), hover_x.clone());
             move |area, cr, _, _| {
                 let Some(seek) = seek.upgrade() else { return };
                 let segs = segments.borrow();
@@ -336,9 +536,28 @@ impl Controls {
                 let Some(r) = trough.compute_bounds(area) else { return };
                 let (h, y) = (r.height() as f64, r.y() as f64);
                 let x_at = |t: f64| r.x() as f64 + r.width() as f64 * (t / dur).clamp(0.0, 1.0);
+                let (pos, until) = (seek.value(), cached_until.get());
+                // Mit Kapiteln (Klasse `chapters`, Schiene per CSS unsichtbar): Timeline selbst zeichnen, ein
+                // Abschnitt pro Kapitel mit Lücke dazwischen wie bei YouTube; alles Weitere nur in diesen Abschnitten.
+                if seek.has_css_class("chapters") {
+                    let spans = chapter_spans(&chapters.borrow(), dur, r.x() as f64, r.width() as f64);
+                    let hovered = hover_x.get();
+                    for (x0, x1) in &spans {
+                        let grow = if hovered.is_some_and(|x| x >= *x0 - CHAPTER_GAP / 2.0 && x <= *x1 + CHAPTER_GAP / 2.0) { CHAPTER_HOVER_GROW } else { 0.0 };
+                        rounded(cr, *x0, y - grow, x1 - x0, h + 2.0 * grow, h / 2.0);
+                    }
+                    cr.clip();
+                    let (top, height) = (y - CHAPTER_HOVER_GROW, h + 2.0 * CHAPTER_HOVER_GROW);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.3);
+                    cr.rectangle(r.x() as f64, top, r.width() as f64, height);
+                    let _ = cr.fill();
+                    // Gespielter Teil weiß (wie `highlight`).
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+                    cr.rectangle(r.x() as f64, top, x_at(pos) - r.x() as f64, height);
+                    let _ = cr.fill();
+                }
                 // Vorgeladener Bereich (aktuelle Stelle bis Pufferende) heller, wie bei YouTube:
                 // dorthin springen geht ohne Warten.
-                let (pos, until) = (seek.value(), cached_until.get());
                 if until > pos {
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.3);
                     cr.rectangle(x_at(pos), y, x_at(until) - x_at(pos), h);
@@ -355,11 +574,38 @@ impl Controls {
                 }
             }
         });
+        // Gespielter Teil wird mitgezeichnet: bei jeder Änderung (Abspielen, Ziehen) neu.
+        seek.connect_value_changed({
+            let layer = segment_layer.downgrade();
+            move |s| {
+                if let Some(l) = layer.upgrade().filter(|_| s.has_css_class("chapters")) {
+                    l.queue_draw();
+                }
+            }
+        });
         let seek_row = gtk::Overlay::builder().child(&seek).build();
         seek_row.add_overlay(&segment_layer);
         bar.append(&seek_row);
 
         let hover = gtk::EventControllerMotion::new();
+        hover.connect_motion({
+            let (hover_x, layer) = (hover_x.clone(), segment_layer.downgrade());
+            move |_, x, _| {
+                hover_x.set(Some(x));
+                if let Some(l) = layer.upgrade() {
+                    l.queue_draw();
+                }
+            }
+        });
+        hover.connect_leave({
+            let (hover_x, layer) = (hover_x.clone(), segment_layer.downgrade());
+            move |_| {
+                hover_x.set(None);
+                if let Some(l) = layer.upgrade() {
+                    l.queue_draw();
+                }
+            }
+        });
         hover.connect_motion({
             let (preview, pic, label, seek, storyboard, sheets, chapters) = (
                 preview.clone(),
@@ -416,6 +662,9 @@ impl Controls {
             vol,
             mute,
             settings,
+            subtitles,
+            sub_menu,
+            sub_prefs,
             speed_buttons,
             cursor_target: cursor_target.clone().upcast(),
             hide_timer: RefCell::default(),
@@ -434,6 +683,7 @@ impl Controls {
             vol_target: Cell::new(None),
             live: Cell::new(false),
             paused: Cell::new(false),
+            last_chapter_jump: Cell::new(None),
         });
         c.mute.connect_clicked({
             let c = Rc::downgrade(&c);
@@ -461,7 +711,7 @@ impl Controls {
             // Maus ruht: Hover-Hervorhebung aus (style.css `.idle`), auch wenn die Leiste sichtbar bleibt.
             c.cursor_target.add_css_class("idle");
             // Pausiert oder bei offenem Einstellungsmenü sichtbar bleiben.
-            if !c.paused.get() && !c.settings.is_active() {
+            if !c.paused.get() && !c.menu_open() {
                 c.widget.set_reveal_child(false);
                 c.cursor_target.set_cursor_from_name(Some("none"));
             }
@@ -469,9 +719,26 @@ impl Controls {
         self.hide_timer.replace(Some(id));
     }
 
+    fn menu_open(&self) -> bool {
+        self.settings.is_active() || self.sub_menu.is_visible()
+    }
+
+    /// Untertitel an/aus. Beim Einschalten die gewählte Sprache (Standard Englisch).
+    /// `false` = das Video hat keine Untertitel.
+    pub fn toggle_subs(&self) -> bool {
+        if self.mpv.get_property::<String>("sid").is_ok_and(|s| s != "no") {
+            let _ = self.mpv.set_property("sid", "no");
+            return true;
+        }
+        match pick_sub(&sub_tracks(self.mpv), &self.sub_prefs.borrow().lang) {
+            Some(id) => self.mpv.set_property("sid", id).is_ok(),
+            None => false,
+        }
+    }
+
     /// Sofort ausblenden (Maus hat den Player verlassen). Bei offenem Einstellungsmenü nicht.
     pub fn hide(&self) {
-        if self.settings.is_active() {
+        if self.menu_open() {
             return;
         }
         if let Some(t) = self.hide_timer.take() {
@@ -490,7 +757,7 @@ impl Controls {
         self.storyboard.replace(None);
         self.sheets.borrow_mut().clear();
         self.set_segments(vec![]);
-        self.seek.clear_marks();
+        self.seek.remove_css_class("chapters");
         self.seek.set_visible(!live);
         self.seek.set_value(0.0);
         self.update_time();
@@ -520,12 +787,32 @@ impl Controls {
                 Some((start, title))
             })
             .collect();
-        self.seek.clear_marks();
-        for (start, _) in chapters.iter().filter(|(s, _)| *s > 0.0) {
-            self.seek.add_mark(*start, gtk::PositionType::Bottom, None);
-        }
+        // Ab zwei Kapiteln: Timeline in Abschnitte geteilt (siehe Zeichenfläche `segment_layer`).
+        if chapters.len() > 1 { self.seek.add_css_class("chapters") } else { self.seek.remove_css_class("chapters") }
         self.chapters.replace(chapters);
+        self.segment_layer.queue_draw();
         self.update_time();
+    }
+
+    /// Anderer Sprung (Pfeiltasten, Ziffern): gemerktes Kapitelziel gilt nicht mehr.
+    pub fn forget_chapter_jump(&self) {
+        self.last_chapter_jump.set(None);
+    }
+
+    pub fn has_chapters(&self) -> bool {
+        self.chapters.borrow().len() > 1
+    }
+
+    /// Zum nächsten (`dir` > 0) bzw. vorigen Kapitel springen (Strg+→/←). Gibt den Kapiteltitel zurück
+    /// (leer, wenn das Kapitel keinen hat); `None` = keine Kapitel bzw. kein weiteres.
+    pub fn chapter_jump(&self, dir: i32) -> Option<String> {
+        let chapters = self.chapters.borrow();
+        let last = self.last_chapter_jump.get().map(|(t, at)| (t, at.elapsed().as_secs_f64()));
+        let i = chapter_target(&chapters, chapter_pos(self.pos.get(), last), dir)?;
+        let target = chapters[i].0;
+        let _ = self.mpv.command("seek", &[&target.to_string(), "absolute"]);
+        self.last_chapter_jump.set(Some((target, std::time::Instant::now())));
+        Some(chapters[i].1.clone())
     }
 
     /// Geschwindigkeit eine Stufe schneller (+1) oder langsamer (-1), wie `>` / `<` bei YouTube.
@@ -672,9 +959,47 @@ mod tests {
         assert_eq!(chapter_at(&ch, 60.0), Some("Teil 1"));
         assert_eq!(chapter_at(&ch, 999.0), Some("Ende"));
         assert_eq!(chapter_at(&[], 5.0), None);
+        // Strg+→: nächstes Kapitel; Strg+←: Anfang des aktuellen, in den ersten 3 s das vorige.
+        assert_eq!(chapter_target(&ch, 10.0, 1), Some(1));
+        assert_eq!(chapter_target(&ch, 400.0, 1), None);
+        assert_eq!(chapter_target(&ch, 100.0, -1), Some(1));
+        assert_eq!(chapter_target(&ch, 61.0, -1), Some(0));
+        assert_eq!(chapter_target(&ch, 1.0, -1), Some(0));
+        assert_eq!(chapter_target(&[], 5.0, 1), None);
+        // Nach einem Sprung auf 60 s landet mpv beim Schlüsselbild 57,5 s: zählt als 60 s, damit der nächste
+        // Druck weiterspringt (→ Kapitel 2) bzw. zurück ins vorige (← Kapitel 0).
+        let p = chapter_pos(57.5, Some((60.0, 0.3)));
+        assert_eq!(chapter_target(&ch, p, 1), Some(2));
+        assert_eq!(chapter_target(&ch, p, -1), Some(0));
+        // Weitergespielt, zu alt oder weit weg gesprungen: echte Position.
+        assert_eq!(chapter_pos(62.0, Some((60.0, 0.3))), 62.0);
+        assert_eq!(chapter_pos(57.5, Some((60.0, 20.0))), 57.5);
+        assert_eq!(chapter_pos(10.0, Some((60.0, 0.3))), 10.0);
+        // Abschnitte: 3 Kapitel → 3 Stücke, Lücken an den Grenzen, Enden bündig.
+        let sp = chapter_spans(&ch, 600.0, 0.0, 600.0);
+        assert_eq!(sp.len(), 3);
+        assert_eq!((sp[0].0, sp[2].1), (0.0, 600.0));
+        assert_eq!(sp[0].1, 60.0 - CHAPTER_GAP / 2.0);
+        assert_eq!(sp[1].0, 60.0 + CHAPTER_GAP / 2.0);
         assert_eq!(speed_label(1.5), "1.5×");
         assert_eq!(speed_label(1.0), "Normal");
         assert!(format_for(720).contains("height<=720"));
+    }
+
+    #[test]
+    fn subtitles() {
+        let t = |v: &[(i64, &str)]| v.iter().map(|(i, l)| (*i, l.to_string())).collect::<Vec<_>>();
+        let tracks = t(&[(1, "de"), (2, "en-orig"), (3, "en")]);
+        assert_eq!(pick_sub(&tracks, "en"), Some(3));
+        assert_eq!(pick_sub(&tracks, "en-orig"), Some(2));
+        assert_eq!(pick_sub(&tracks, "de"), Some(1));
+        assert_eq!(pick_sub(&t(&[(1, "de"), (2, "en-orig")]), "en"), Some(2));
+        assert_eq!(pick_sub(&t(&[(1, "de")]), "fr"), Some(1));
+        assert_eq!(pick_sub(&[], "en"), None);
+        assert_eq!(lang_label("en-orig"), "English (en-orig)");
+        assert_eq!(SubPrefs::parse(""), SubPrefs { lang: "en".into(), size: 38, boxed: false });
+        assert_eq!(SubPrefs::parse("de\n48\nbox\n"), SubPrefs { lang: "de".into(), size: 48, boxed: true });
+        assert_eq!(SubPrefs::parse("de\n999\n").size, 38);
     }
 }
 
