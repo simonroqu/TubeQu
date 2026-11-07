@@ -273,12 +273,12 @@ scale.timeline highlight {
 }
 
 /* Lade-Kreis (icons.rs `spinner`): dreht sich, solange er sichtbar ist. */
-@keyframes tube-spin {
+@keyframes tubequ-spin {
   to { -gtk-icon-transform: rotate(1turn); }
 }
 
-.tube-spinner {
-  animation: tube-spin 0.8s linear infinite;
+.tubequ-spinner {
+  animation: tubequ-spin 0.8s linear infinite;
   opacity: 0.8;
 }
 

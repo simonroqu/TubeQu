@@ -335,7 +335,7 @@ impl Player {
             .css_classes(["osd"])
             .build();
         let retry = gtk::Button::builder()
-            .icon_name("tube-reload-symbolic")
+            .icon_name("tubequ-reload-symbolic")
             .tooltip_text("Reload")
             .halign(gtk::Align::Center)
             .focusable(false)
@@ -370,8 +370,8 @@ impl Player {
         widget.add_overlay(&flash);
 
         // Endbildschirm: Nochmal / Zur Startseite (nur Icons).
-        let end_again = gtk::Button::builder().icon_name("tube-reload-symbolic").tooltip_text("Watch again").focusable(false).build();
-        let end_home = gtk::Button::builder().icon_name("tube-home-symbolic").tooltip_text("Home").focusable(false).build();
+        let end_again = gtk::Button::builder().icon_name("tubequ-reload-symbolic").tooltip_text("Watch again").focusable(false).build();
+        let end_home = gtk::Button::builder().icon_name("tubequ-home-symbolic").tooltip_text("Home").focusable(false).build();
         let end_box = gtk::Box::builder()
             .spacing(2)
             .halign(gtk::Align::Center)

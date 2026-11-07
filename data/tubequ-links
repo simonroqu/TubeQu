@@ -1,12 +1,12 @@
 #!/bin/sh
-# Weiche für Links aus anderen Apps (Discord, Terminal …): YouTube-Videos und -Kanäle öffnet Tube,
+# Weiche für Links aus anderen Apps (Discord, Terminal …): YouTube-Videos und -Kanäle öffnet Tubequ,
 # alles andere geht wie bisher über omarchy-launch-browser an den Standard-Browser.
 # Eingetragen von install.sh in ~/.config/hyprland-mimeapps.list, nur für https: Omarchy bestimmt den
 # Browser über den http-Eintrag, der bleibt unverändert (Super+B usw. unberührt).
 # Entfernen: dort die https-Zeile wieder auf `omarchy-browser.desktop` setzen.
-# Test ohne etwas zu öffnen: TUBE_LINKS_DRYRUN=1 tube-links <url>
-tube="@BIN@"
-run() { if [ -n "$TUBE_LINKS_DRYRUN" ]; then echo "$*"; else exec "$@"; fi; }
+# Test ohne etwas zu öffnen: TUBEQU_LINKS_DRYRUN=1 tubequ-links <url>
+tubequ="@BIN@"
+run() { if [ -n "$TUBEQU_LINKS_DRYRUN" ]; then echo "$*"; else exec "$@"; fi; }
 
 for url in "$@"; do
   case "$url" in
@@ -14,13 +14,13 @@ for url in "$@"; do
     https://www.youtube.com/watch\?* | https://youtube.com/watch\?* | https://m.youtube.com/watch\?* | \
     https://www.youtube.com/shorts/* | https://youtube.com/shorts/* | \
     https://www.youtube.com/channel/* | https://youtube.com/channel/*)
-      run "$tube" "$url" ;;
+      run "$tubequ" "$url" ;;
   esac
 done
 
 # Schutz gegen eine Endlosschleife, falls Omarchy diese Weiche je selbst für den Browser hält: kommt
 # ein Link binnen 3 s erneut hier an, direkt an den Browser aus ~/.config/mimeapps.list.
-marker="${XDG_RUNTIME_DIR:-/tmp}/tube-links.marker"
+marker="${XDG_RUNTIME_DIR:-/tmp}/tubequ-links.marker"
 if [ -n "$(find "$marker" -newermt '-3 seconds' 2>/dev/null)" ]; then
   browser=$(sed -n 's/^x-scheme-handler\/http=\([^;]*\).*/\1/p' "$HOME/.config/mimeapps.list" | head -1)
   for dir in "$HOME/.local/share" /usr/local/share /usr/share; do

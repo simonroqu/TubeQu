@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=Tube
+Name=Tubequ
 GenericName=YouTube client
 Comment=Ad-free YouTube: home feed, search, channels and live streams
 Exec=@BIN@ %u
-Icon=dev.tube.Tube
+Icon=dev.tubequ.Tubequ
 Terminal=false
 Categories=AudioVideo;Video;Player;
 Keywords=youtube;video;stream;live;
-StartupWMClass=dev.tube.Tube
+StartupWMClass=dev.tubequ.Tubequ
 StartupNotify=true

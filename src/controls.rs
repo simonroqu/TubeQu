@@ -29,12 +29,12 @@ const QUALITIES: [(u32, &str); 6] =
 const DEFAULT_QUALITY: u32 = 1080;
 pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
-/// Datei in `~/.config/tube/` (Qualität, Lautstärke).
+/// Datei in `~/.config/tubequ/` (Qualität, Lautstärke).
 fn config_file(name: &str) -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
-    base.join("tube").join(name)
+    base.join("tubequ").join(name)
 }
 
 fn quality_file() -> PathBuf {
@@ -176,7 +176,7 @@ fn radio_column(title: &str, labels: &[String]) -> (gtk::Box, Vec<gtk::CheckButt
 
 impl Controls {
     pub fn new(mpv: &'static Mpv, cursor_target: &impl IsA<gtk::Widget>) -> Rc<Self> {
-        let play = icon_button("tube-pause-symbolic", "Pause (space)");
+        let play = icon_button("tubequ-pause-symbolic", "Pause (space)");
         play.connect_clicked(move |_| {
             let _ = mpv.command("cycle", &["pause"]);
         });
@@ -184,7 +184,7 @@ impl Controls {
         let seek = slider(1.0);
         seek.set_hexpand(true);
 
-        let mute = icon_button("tube-volume-symbolic", "Mute (m)");
+        let mute = icon_button("tubequ-volume-symbolic", "Mute (m)");
         let vol = slider(MAX_VOLUME);
         vol.set_width_request(90);
         vol.set_margin_end(8);
@@ -197,7 +197,7 @@ impl Controls {
             .css_classes(["numeric"])
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
-        let fullscreen = icon_button("tube-fullscreen-symbolic", "Full screen (f)");
+        let fullscreen = icon_button("tubequ-fullscreen-symbolic", "Full screen (f)");
 
         // Timeline: change-value kommt nur von der Maus, nicht von set_value (keine Rückkopplung).
         // Beim Ziehen nicht bei jeder Bewegung springen (jeder Sprung lädt neu), sondern erst,
@@ -230,7 +230,7 @@ impl Controls {
         menu.append(&quality_col);
         menu.append(&speed_col);
         let settings = gtk::MenuButton::builder()
-            .icon_name("tube-settings-symbolic")
+            .icon_name("tubequ-settings-symbolic")
             .tooltip_text("Settings")
             .direction(gtk::ArrowType::Up)
             .popover(&gtk::Popover::builder().child(&menu).build())
@@ -283,7 +283,7 @@ impl Controls {
         buttons.append(&bubble(&[time.upcast_ref()]));
         buttons.append(&gtk::Box::builder().hexpand(true).build());
         // Untertitel durchschalten (wie Taste c); die Sprache blendet der Player ein.
-        let subtitles = icon_button("tube-subtitles-symbolic", "Subtitles (c)");
+        let subtitles = icon_button("tubequ-subtitles-symbolic", "Subtitles (c)");
         subtitles.connect_clicked(move |_| {
             let _ = mpv.command("cycle", &["sub"]);
         });
@@ -609,9 +609,9 @@ impl Controls {
             ("pause", PropertyData::Flag(p)) => {
                 self.paused.set(p);
                 let (icon, tip) = if p {
-                    ("tube-play-symbolic", "Play (space)")
+                    ("tubequ-play-symbolic", "Play (space)")
                 } else {
-                    ("tube-pause-symbolic", "Pause (space)")
+                    ("tubequ-pause-symbolic", "Pause (space)")
                 };
                 self.play.set_icon_name(icon);
                 self.play.set_tooltip_text(Some(tip));
@@ -632,7 +632,7 @@ impl Controls {
             }
             ("mute", PropertyData::Flag(m)) => {
                 self.muted.set(m);
-                self.mute.set_icon_name(if m { "tube-mute-symbolic" } else { "tube-volume-symbolic" });
+                self.mute.set_icon_name(if m { "tubequ-mute-symbolic" } else { "tubequ-volume-symbolic" });
             }
             _ => {}
         }

@@ -18,7 +18,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for NavShape {
-        const NAME: &'static str = "TubeNavShape";
+        const NAME: &'static str = "TubequNavShape";
         type Type = super::NavShape;
         type ParentType = gtk::Box;
     }

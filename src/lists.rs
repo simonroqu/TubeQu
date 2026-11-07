@@ -1,4 +1,4 @@
-//! Kleine lokale Listen in `~/.local/share/tube/`: „Später ansehen“, Suchverlauf und die
+//! Kleine lokale Listen in `~/.local/share/tubequ/`: „Später ansehen“, Suchverlauf und die
 //! Geschwindigkeit pro Kanal. Alles ohne Anfragen an YouTube.
 
 use crate::progress::data_file;

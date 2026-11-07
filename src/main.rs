@@ -139,7 +139,7 @@ impl Nav {
         self.player.stop();
         self.set_mini(false);
         self.watch.widget.set_visible(self.current() == "watch");
-        self.window.set_title(Some("Tube"));
+        self.window.set_title(Some("Tubequ"));
     }
 
     fn go(&self, page: &str) {
@@ -193,14 +193,14 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     let nav_button = |icon: &str, tip: &str| {
         gtk::Button::builder().icon_name(icon).tooltip_text(tip).focusable(false).css_classes(["flat"]).build()
     };
-    let back = nav_button("tube-back-symbolic", "Back (Esc)");
+    let back = nav_button("tubequ-back-symbolic", "Back (Esc)");
     back.set_visible(false);
-    let home = nav_button("tube-home-symbolic", "Home");
-    let search_button = nav_button("tube-search-symbolic", "Search (/)");
-    let history_button = nav_button("tube-history-symbolic", "History");
-    let later_button = nav_button("tube-later-symbolic", "Watch later");
+    let home = nav_button("tubequ-home-symbolic", "Home");
+    let search_button = nav_button("tubequ-search-symbolic", "Search (/)");
+    let history_button = nav_button("tubequ-history-symbolic", "History");
+    let later_button = nav_button("tubequ-later-symbolic", "Watch later");
     // Oben: Burger, Zurück, Home, Suche. Der Burger klappt die Bubble nach unten auf (übrige Seiten).
-    let menu_button = nav_button("tube-menu-symbolic", "More");
+    let menu_button = nav_button("tubequ-menu-symbolic", "More");
     let top = gtk::Box::builder().spacing(2).height_request(32).build();
     top.append(&menu_button);
     top.append(&back);
@@ -262,7 +262,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title("Tube")
+        .title("Tubequ")
         .default_width(1280)
         .default_height(860)
         .decorated(false)
@@ -333,12 +333,12 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         .css_classes(["bubble"])
         .visible(false)
         .build();
-    let mini_play = nav_button("tube-pause-symbolic", "Play/Pause");
+    let mini_play = nav_button("tubequ-pause-symbolic", "Play/Pause");
     player.controls.play.bind_property("icon-name", &mini_play, "icon-name").sync_create().build();
-    let mini_mute = nav_button("tube-volume-symbolic", "Mute");
+    let mini_mute = nav_button("tubequ-volume-symbolic", "Mute");
     player.controls.mute.bind_property("icon-name", &mini_mute, "icon-name").sync_create().build();
-    let mini_open = nav_button("tube-fullscreen-symbolic", "Back to video");
-    let mini_close = nav_button("tube-close-symbolic", "Close");
+    let mini_open = nav_button("tubequ-fullscreen-symbolic", "Back to video");
+    let mini_close = nav_button("tubequ-close-symbolic", "Close");
     for b in [&mini_play, &mini_mute, &mini_open, &mini_close] {
         mini_bar.append(b);
     }
@@ -392,9 +392,9 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |v: Video| {
             watch.show(&v);
             nav.go("watch");
-            // Fenstertitel = Videotitel (Alt-Tab, Fensterliste); „Tube“ bleibt hinten dran.
+            // Fenstertitel = Videotitel (Alt-Tab, Fensterliste); „Tubequ“ bleibt hinten dran.
             if !v.title.is_empty() {
-                nav.window.set_title(Some(&format!("{} – Tube", v.title)));
+                nav.window.set_title(Some(&format!("{} – Tubequ", v.title)));
             }
             let (player, watch) = (player.clone(), watch.clone());
             glib::spawn_future_local(async move {
@@ -543,7 +543,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |w| {
             let full = w.is_fullscreen();
             watch.set_fullscreen(full);
-            fs.set_icon_name(if full { "tube-restore-symbolic" } else { "tube-fullscreen-symbolic" });
+            fs.set_icon_name(if full { "tubequ-restore-symbolic" } else { "tubequ-fullscreen-symbolic" });
         }
     });
     // Player-Höhe an das Seitenverhältnis des Videos anpassen.
@@ -664,8 +664,8 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     });
 
     // Öffnet, was beim Start übergeben wurde, auch wenn die App schon läuft:
-    // `tube <video-link>` spielt ab, `tube <kanal-link>` öffnet den Kanal, `tube <suchbegriff>` sucht,
-    // `tube` allein zeigt beim ersten Mal die Startseite und holt sonst nur das Fenster nach vorne.
+    // `tubequ <video-link>` spielt ab, `tubequ <kanal-link>` öffnet den Kanal, `tubequ <suchbegriff>` sucht,
+    // `tubequ` allein zeigt beim ersten Mal die Startseite und holt sonst nur das Fenster nach vorne.
     let started = std::cell::Cell::new(false);
     Rc::new(move |arg: Option<String>| {
         match arg {
@@ -674,7 +674,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 open_channel(id.split(['/', '?']).next().unwrap_or(id).to_string());
             }
             Some(arg) if arg.starts_with("http") => {
-                // Per Link (auch aus anderen Apps über tube-links): wie ein Klick, also über das Anfragen-Limit;
+                // Per Link (auch aus anderen Apps über tubequ-links): wie ein Klick, also über das Anfragen-Limit;
                 // Titel usw. kommen über die Details nach. Andere Adressen spielt mpv direkt.
                 match video_id(&arg) {
                     Some(id) => play(Video { id, ..Default::default() }),
@@ -719,8 +719,8 @@ fn main() -> glib::ExitCode {
     // libmpv verlangt LC_NUMERIC=C; ohne setlocale durch GTK bleibt alles auf C.
     gtk::disable_setlocale();
     let app = gtk::Application::builder()
-        .application_id("dev.tube.Tube")
-        .flags(if std::env::var_os("TUBE_DEV").is_some() {
+        .application_id("dev.tubequ.Tubequ")
+        .flags(if std::env::var_os("TUBEQU_DEV").is_some() {
             // Entwicklung: eigene Instanz neben der installierten, statt Aufrufe an sie weiterzugeben.
             gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::NON_UNIQUE
         } else {

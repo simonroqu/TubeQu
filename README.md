@@ -1,4 +1,4 @@
-# Tube
+# Tubequ
 
 A lightweight YouTube desktop client for Linux, written in Rust with GTK4 and libmpv.
 
@@ -20,16 +20,16 @@ A lightweight YouTube desktop client for Linux, written in Rust with GTK4 and li
 
 ```sh
 cargo build --release
-./install.sh        # installs to ~/.local/bin/tube and adds a launcher entry
+./install.sh        # installs to ~/.local/bin/tubequ and adds a launcher entry
 ```
 
 Run directly:
 
 ```sh
-tube                 # home page
-tube lofi            # search
-tube <video-url>     # play
-tube <channel-url>   # open channel
+tubequ               # home page
+tubequ lofi          # search
+tubequ <video-url>   # play
+tubequ <channel-url> # open channel
 ```
 
 ## Keyboard shortcuts
@@ -47,9 +47,9 @@ Double-click left/right on the player seeks −/+10 s, the middle toggles fullsc
 
 ## Data
 
-- `~/.local/share/tube/`: progress, watch later, recent searches, speeds
-- `~/.config/tube/`: quality, volume
-- `~/.cache/tube/`: thumbnails, cached home page
+- `~/.local/share/tubequ/`: progress, watch later, recent searches, speeds
+- `~/.config/tubequ/`: quality, volume
+- `~/.cache/tubequ/`: thumbnails, cached home page
 
 ## Credits
 
@@ -60,7 +60,7 @@ Double-click left/right on the player seeks −/+10 s, the middle toggles fullsc
 
 ## Disclaimer
 
-Tube is not affiliated with, endorsed by or sponsored by YouTube or Google. "YouTube" is a trademark of Google LLC.
+Tubequ is not affiliated with, endorsed by or sponsored by YouTube or Google. "YouTube" is a trademark of Google LLC.
 Use it in accordance with the terms of the services you access.
 
 ## License

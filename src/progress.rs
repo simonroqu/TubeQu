@@ -1,5 +1,5 @@
 //! Merkt sich pro Video, wie weit es geschaut wurde (plus Titel und Kanal für „Weiterschauen“).
-//! Datei: ~/.local/share/tube/progress.tsv, eine Zeile pro Video:
+//! Datei: ~/.local/share/tubequ/progress.tsv, eine Zeile pro Video:
 //! id, Position, Dauer, Zeitstempel, Titel, Kanal, Kanal-ID, Veröffentlichung (die letzten vier können fehlen).
 
 use crate::youtube::Video;
@@ -38,12 +38,12 @@ impl Entry {
     }
 }
 
-/// Datei in `~/.local/share/tube/`.
+/// Datei in `~/.local/share/tubequ/`.
 pub fn data_file(name: &str) -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
-    base.join("tube").join(name)
+    base.join("tubequ").join(name)
 }
 
 fn path() -> PathBuf {

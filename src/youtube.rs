@@ -86,7 +86,7 @@ impl From<Paginator<VideoItem>> for Page {
 }
 
 fn cache_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/tube")
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/tubequ")
 }
 
 static RP: LazyLock<RustyPipe> = LazyLock::new(|| {
