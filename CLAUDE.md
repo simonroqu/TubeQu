@@ -32,8 +32,8 @@ Link-Weiche (nur Omarchy): `install.sh` setzt in `~/.config/hyprland-mimeapps.li
 den Browser am http-Eintrag erkennt (sonst Schleife + Super+B kaputt). Test: `TUBEQU_LINKS_DRYRUN=1 tubequ-links <url>`.
 Rückgängig: https-Zeile wieder auf `omarchy-browser.desktop` (Sicherung `.bak-tubequ`).
 
-Systemvoraussetzungen: `gtk4` (≥ 4.20), `mpv`/libmpv, `yt-dlp`, `deno` (yt-dlp braucht eine
-JS-Laufzeit für YouTube). Browser-Login (Zen/Firefox/LibreWolf/Chromium/Brave/Chrome) optional.
+Systemvoraussetzungen: `gtk4` (≥ 4.20), `mpv`/libmpv, `yt-dlp` + JS-Laufzeit (Omarchy-yt-dlp ab 2026.10.26:
+`node` über `/etc/yt-dlp.conf` `--js-runtimes node`, Challenge-Löser ejs ist eingebaut; sonst `deno`). Browser-Login (Zen/Firefox/LibreWolf/Chromium/Brave/Chrome) optional.
 
 ## Aufbau (`src/`)
 
@@ -52,6 +52,7 @@ JS-Laufzeit für YouTube). Browser-Login (Zen/Firefox/LibreWolf/Chromium/Brave/C
 | `sponsorblock.rs` | SponsorBlock-Abschnitte (sponsor.ajay.app, Hash-Präfix, kein YouTube-Request) |
 | `theme.rs` | Farben aus Omarchy `colors.toml`, Rundung aus Theme-`hyprland.lua`, Live-Reload; Fallback = Farben von „Last Horizon“ |
 | `nav_shape.rs` | Selbst gezeichnete Form der Nav-Bubble: Pille → umgedrehtes L (Burger offen) → liegendes U (Kontoliste offen, `set_parts`) |
+| `fly.rs` | Öffnen-Animation wie beim iPhone: `Zoom` umgibt die Ansehen-Seite; der Player (Anker) beginnt genau auf dem Startrechteck (Karte bzw. alter Player-Platz) und wächst 380 ms an seinen Platz, die Seite skaliert mit, der Ausschnitt wächst vom Start auf die ganze Seite (nur Zeichnen, kein Layout pro Bild). Dahinter beim Großwerden ein abgedunkeltes Standbild der alten Seite (`backdrop`). Stack-Wechsel von/zur Ansehen-Seite **ohne** Überblendung (`Nav::show`), sonst ist es beim Schrumpfen dahinter schwarz. `contains` = false, damit der Zoom im Miniplayer-Modus keine Klicks schluckt. Aus bei `gtk-enable-animations=false` |
 | `smooth.rs` | Weiches Scrollen mit dem Mausrad, Tastatur-Fokus im Raster |
 | `icons.rs` | Eigene Symbol-Icons (`data/icons/*.svg`), eingebettet, beim Start nach `~/.cache/tubequ/icons` geschrieben; neue Icons in `ICONS` eintragen (Arraylänge!) |
 | `style.css` | Layout-CSS (Bubbles, Timeline, Suche …), nutzt `--radius-*`-Variablen aus `theme.rs` |
@@ -68,7 +69,7 @@ Muster: Netzwerk nie im GTK-Thread. `glib::spawn_future_local(async { bg(fut).aw
 | Kanalseite (Name, Avatar, Abos, Videos) | `yt-dlp -J --flat-playlist …/channel/<id>/videos` + `youtubetab:approximate_date` (mit Login: Cookies + Konto-Header) | 1 Anfrage, Nachladen über `ytdlp_page`; Datum ungefähr, Aufrufe + Dauer vorhanden; Avatar = `avatar_uncropped` mit `=s176`; Abonnentenzahl = `channel_follower_count` |
 | Suche | mit Login `yt-dlp --cookies-from-browser … ytsearchall:<q>` (personalisiert), sonst/bei Fehler rustypipe | gemeinsamer Code mit Startseite: `ytdlp_page` |
 | Startseite (persönliche Empfehlungen) | `yt-dlp --cookies-from-browser … :ytrec` | Datum nur ungefähr (`youtubetab:approximate_date`), Aufrufe fehlen oft; ohne Login eigene Empfehlungen aus ähnlichen Videos |
-| Abspielen | mpv → ytdl_hook → yt-dlp, **anonym** | Format über `ytdl-format`, Qualität in `~/.config/tubequ/quality` |
+| Abspielen | mpv → ytdl_hook → yt-dlp, **anonym**, `player_client=visionos` (HLS, kein PO-Token) | Format über `ytdl-format`, Qualität in `~/.config/tubequ/quality`. Standard-Clients von yt-dlp 2026.10.26 (`tv_samsung`, `visionos`, `web`): `tv_samsung`-Streams (`c=TVHTML5`) bekommen seit 2026-11-16 unregelmäßig 403 → „Couldn't load video“ |
 | Als gesehen melden | `youtubei/v1/player` per `innertube` (Cookies, Konto) → `playbackTracking`; Ping an `videostatsPlaybackUrl` (Verlauf), bei Pause/Videowechsel/Stopp Ping an `videostatsWatchtimeUrl` mit echter Position (`cmt`, `st=0`, `et=pos`) | 1 Anfrage über `throttle()`; Pings an s.youtube.com ungedrosselt. **Nicht** `yt-dlp --mark-watched`: meldet immer `len-1` → Video bei YouTube ganz gesehen. Abspielen selbst bleibt ohne Login |
 | Thumbnails/Avatare | `i.ytimg.com` / yt3 per reqwest, Cache `~/.cache/tubequ/thumbs` | zählt nicht zum Limit, max. 6 parallel |
 | SponsorBlock | sponsor.ajay.app | zählt nicht zum Limit |
@@ -88,6 +89,9 @@ Bekannte Lücken (nicht nochmal „neu entdecken“):
   in `~/.cache/tubequ/rustypipe_reports/` (mit kompletter YouTube-Antwort) – erste Anlaufstelle.
 - rustypipe `player()` scheitert („could not get deobf data“) → rustypipe kann **nicht** abspielen.
 - Mit Browser-Cookies abspielen → 403 auf die Streams. Darum: Abspielen anonym.
+  Ausnahme altersbeschränkte Videos („Sign in to confirm your age“): der eine automatische Zweitversuch
+  (`player.rs`, `retried`) lädt dann mit `youtube::login_ytdl_options` (Browser-Cookies + Konto-Header,
+  `player_client=tv`) als `ytdl-raw-options` pro Datei (`with_login`, mpv-Schreibweise `%n%wert`). Keine Extra-Anfrage.
 - Liken ist bewusst nicht eingebaut.
 - Eigener Google-Login ohne Browser geht nicht: eingebettete Browser blockiert Google beim Login,
   TV-/OAuth-Login für YouTube ist gesperrt (yt-dlp hat ihn 2024 entfernt). Darum Browser-Cookies.
@@ -154,6 +158,8 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   Hintergrund (6 px), weiß statt Signalfarben. Erscheint nur bei Mausbewegung **über dem
   Player**, weg nach 2 s oder sofort beim Verlassen; pausiert/Menü offen bleibt sie.
   Ruht die Maus 2 s, verschwindet auch die Hover-Hervorhebung (Klasse `idle` am Player).
+  Bewegung zählt nur bei geänderter Position (`player.rs`): GTK schickt nach Layout-Änderungen (Ein-/Ausblenden,
+  Zeit) Bewegungs-Ereignisse an derselben Stelle nach – sonst blendet sich die Leiste nie aus (wie AniQu).
 - Buttons: **immer Icons, keine Beschriftung** (z. B. Reload = `tubequ-reload-symbolic`, nicht „Reload“);
   Erklärung nur als Tooltip. Kein Rahmen/Hintergrund, nur Hover-/Klick-Effekt. Eigene minimalistische
   Icons (`tubequ-*-symbolic`, 16×16, `fill="#000"`, GTK färbt sie in der Schriftfarbe), keine Emojis.
@@ -195,7 +201,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   das im ytdl_hook selbst, mpv 0.41 nicht). Vorgeladener Bereich hell in der Timeline
   (`demuxer-cache-time`); Spinner auch beim Puffern/Springen (nach 300 ms, kein Flackern).
 - Lautstärke-Angleich: `af=lavfi=[dynaudnorm=f=250:g=15:p=0.95]` (kein Startverzug, getestet). `TUBEQU_NO_NORM=1` schaltet ihn ab (Gegenprobe).
-- Kapitel (mpv `chapter-list`, ab 2 Stück): Timeline in Abschnitte mit Lücken wie bei YouTube. Die Schiene zeichnet dann `segment_layer` selbst (Klasse `chapters` am Regler macht trough/highlight per CSS unsichtbar; `chapter_spans`), der Abschnitt unter der Maus wird dicker; beim Überfahren steht der Kapiteltitel in der Vorschau.
+- Kapitel (mpv `chapter-list`, ab 2 Stück): Timeline in Abschnitte mit 1-px-Lücken (`CHAPTER_GAP`); rund nur an Anfang und Ende der ganzen Timeline, an Kapitelgrenzen eckig (`rounded` mit Radius links/rechts). Die Schiene zeichnet dann `segment_layer` selbst (Klasse `chapters` am Regler macht trough/highlight per CSS unsichtbar; `chapter_spans`), der Abschnitt unter der Maus wird dicker; beim Überfahren steht der Kapiteltitel in der Vorschau.
 - Timeline-Vorschau: Storyboard aus dem yt-dlp-JSON (`storyboard_from_ytdlp`, größte Stufe),
   Bögen von i.ytimg.com nur beim Überfahren geladen (im RAM, pro Video), nicht über das Limit.
   Die Vorschau liegt als eigene Ebene im Player (nicht in der Leiste) und sitzt immer `PREVIEW_GAP` über der Schiene (`place_preview`).
@@ -205,6 +211,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   (gemessen 200 ms) → Oberfläche/Spinner hängen. Werte aus `PropertyChange` mitschreiben.
 - Video-Fläche wird beim App-Start eingerichtet (`Player::prepare`, ~120 ms); `play` wartet, bis
   sie bereit ist (sonst „No video output“ + automatischer Zweitversuch = Extra-Anfrage).
+- Beim Laden zeigt der Player das Vorschaubild des Videos (`poster`, `grid::load_thumb`, Thumbnail-Cache, kein YouTube-Limit) unter Spinner/Fehlermeldung; weg bei `FileLoaded`. Bei Fehlern bleibt es stehen.
 - SponsorBlock überspringt sponsor/self-promotion/interaction automatisch, keine Einstellungen.
 - Links in Beschreibung: Zeitstempel springen, YouTube-Videos/Kanäle in der App, Rest im Browser.
 - Kanalseite ohne Live-Tab. Abo-Knopf = YouTube-Symbol (Kontur = nicht abonniert, gefüllt = abonniert),
@@ -217,6 +224,8 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 
 ## Bedienung (Komfort)
 
+- Timeline-Sprung: Die Timeline hält das Ziel (`seek_target`, `seek_state` in `controls.rs`), bis das Video 1 s darüber hinaus ist. mpv meldet nach dem Sprung erst das Ziel, dann das Schlüsselbild davor (`hr-seek=no`), vorher noch die alte Position – sonst springt der Zeiger Ziel → alt → Ziel bzw. kurz zurück.
+
 - Player: Doppelklick links/rechts = −/+10 s, Mitte = Vollbild; `+`/`-` = Lautstärke (Mausrad bewusst nicht); Einblendung
   mitten im Bild bei Sprung/Lautstärke/Ton/Tempo/Untertitel (nicht in den ersten 1,5 s nach `play`).
   Tasten zusätzlich: `0`–`9` (0–90 %), `Strg+←/→` voriges/nächstes Kapitel (`chapter_target`; ← in den ersten 3 s ins vorige, sonst an den Kapitelanfang; Titel wird eingeblendet; mehrfach schnell drücken springt durch, weil das Ziel des letzten Sprungs als Position gilt, solange mpv am Schlüsselbild davor steht: `chapter_pos`), `,`/`.` Bild für Bild, `c` bzw. Linksklick auf den Untertitel-Knopf = an/aus
@@ -228,15 +237,16 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 - Karten: Rechtsklick-Menü (Watch later, Copy link, Open channel, Open in browser – über **http**, damit
   die Link-Weiche es nicht zurück in Tubequ schickt), Mittelklick = Watch later. Fertig Geschautes
   abgedunkelt. Scroll-Position bleibt beim Zurückkommen erhalten.
+- Menü per Tastatur: Esc klappt es auf – auf der Startseite (kein Zurück-Verlauf) und beim Video (im Vollbild verlässt Esc zuerst das Vollbild); sonst bleibt Esc „Zurück“. Pfeil hoch/runter in der Spalte (Watch later, History, Konto; Umlauf), rechts in die obere Reihe (Zurück, Home, Suche), dort links/rechts, links am Anfang bzw. runter zurück in die Spalte; Enter/Leertaste drückt, Esc klappt zu (`menu_key` in `main.rs`). Knöpfe nur dann fokussierbar; `set_focus_visible(true)` zeigt die Markierung (style.css `.bubble button:focus-visible`). Offenes Menü hält die Navigation im Player sichtbar (auch wenn die Leiste weg ist).
 - Nav-Bubble: Burger, Zurück, Home, Suche, Lade-Kreis; Burger klappt die Bubble nach unten auf (Watch later, Verlauf, Konto), Auswahl oder Klick daneben klappt zu. Kein Reload-Knopf. Klick auf den Knopf der Seite, auf der man ist, lädt sie neu.
 - Lade-Kreis in der Bubble: `crate::Busy::new()` in jeden Ladevorgang mitnehmen (Raster, Nachladen, Video-Details, Konten, Abo); Reload lässt das Alte stehen, bis das Neue da ist.
 - Ansehen-Seite: Infos unter dem Video erst sichtbar, wenn die Details da sind; bis dahin graue Platzhalter in derselben Form (Titel, Profilbild-Kreis, Kanal, Beschreibung) mit durchlaufendem Glanzstreifen (`watch.rs` `skeleton`, style.css `.skeleton`), nicht bei direkt abgespielten Adressen. Kanal-Profilbilder haben bis zum Laden einen grauen Kreis (`.avatar.placeholder`). Suchfeld zeigt beim Öffnen die letzte Suche (markiert); leer oder unverändert = Liste der letzten Suchen, keine Vorschlags-Anfrage.
 - Weiches Scrollen mit dem Mausrad (`smooth.rs`, an jedem ScrolledWindow): Raststufen gleiten statt zu springen; Touchpad bleibt bei GTK.
-- Feinschliff (style.css, Ende): Vorschaubilder mit grauem Platzhalter (`.thumb-box`), Einblenden beim Laden (`.fade` → `.loaded`), Hover-Zoom 4 %; Ansehen-Seite blendet ein (`page-in-a/-b` im Wechsel, sonst startet die Animation nicht neu), Miniplayer gleitet in die Ecke (`.mini`).
+- Feinschliff (style.css, Ende): Vorschaubilder mit grauem Platzhalter (`.thumb-box`), Einblenden beim Laden (`.fade` → `.loaded`), Hover-Zoom 4 %; Ansehen-Seite blendet ein (`page-in-a/-b` im Wechsel, sonst startet die Animation nicht neu), Karte → Player und Player ↔ Miniplayer fliegen (`fly.rs`).
 - Ton: Stummschalten blendet über den Filter `@fade` (lavfi `volume`, per `af-command`) in 160 ms aus/ein, `+`/`-` ändern die Lautstärke in kleinen Schritten (`Controls::toggle_mute`/`step_volume`). `af-command` meldet trotzdem einen Fehler (Ziel „all“ trifft auch Filter ohne den Befehl), wirkt aber.
 - Tastatur im Raster: Pfeiltasten wählen die erste Karte, danach navigiert GTK; die Liste gleitet zur gewählten Karte (`smooth.rs`, nur bei Tastatur-Fokus). Timeline braucht nichts: mpv meldet `time-pos` jedes Bild.
 - Nachladen eine Bildschirmhöhe vor dem Ende (`grid.rs`, `connect_value_changed`), nicht früher (jede Seite = Anfrage).
-- Miniplayer: Verlässt man die Ansehen-Seite, während ein Video läuft, spielt es unten rechts klein weiter (400 px, Knöpfe Pause/Ton/Zurück zum Video/Schließen). Die Ansehen-Seite liegt dafür als Ebene über dem Stack (im Stack nur ein Platzhalter „watch“) und wird nur verkleinert (`WatchPage::set_mini`, `Nav::set_mini`): der Player wird **nicht umgehängt**, sonst baut GTK die GLArea neu und mpv schaltet das Video ab. Am Ende/bei Fehler stoppt das Video (`Player::active`).
+- Miniplayer: Verlässt man die Ansehen-Seite, während ein Video läuft, spielt es unten rechts klein weiter (400 px; Knöpfe als Bubbles in den Ecken: oben links groß machen, oben rechts schließen, unten links Play + Ton). Tasten im Miniplayer: Leertaste/`k` Pause, `m` Ton, `f` zurück zum großen Video (kein Vollbild), `q` schließen; Pfeile/Ziffern bleiben fürs Raster. Die Ansehen-Seite liegt dafür als Ebene über dem Stack (im Stack nur ein Platzhalter „watch“) und wird nur verkleinert (`WatchPage::set_mini`, `Nav::set_mini`): der Player wird **nicht umgehängt**, sonst baut GTK die GLArea neu und mpv schaltet das Video ab. Am Ende/bei Fehler stoppt das Video (`Player::active`). Der Miniplayer lässt sich ziehen (`GestureDrag` an der Ansehen-Seite, Capture, ab 8 px; gezeichnet über `Zoom::set_offset`) und gleitet beim Loslassen (`snap` in `main.rs`) mit der Zoom-Animation in die nächste Ecke (`WatchPage::set_corner`, gilt für die Sitzung). Klick ins Miniplayer-Video pausiert deshalb nicht (`player.rs` `in_mini`), Pause über den Knopf.
 - MPRIS über `/usr/lib/mpv-mpris/mpris.so` (Paket mpv-mpris, falls vorhanden); Bildschirmschoner-
   Sperre während der Wiedergabe über `gtk::Application::inhibit`. Fenstertitel = Videotitel.
 

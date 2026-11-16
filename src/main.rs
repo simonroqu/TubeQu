@@ -1,5 +1,6 @@
 mod channel;
 mod controls;
+mod fly;
 mod grid;
 mod icons;
 mod lists;
@@ -16,7 +17,7 @@ mod youtube;
 use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::LazyLock;
 use youtube::Video;
@@ -78,6 +79,8 @@ struct Nav {
     page_layer: gtk::Overlay,
     in_player: std::cell::Cell<bool>,
     watch: Rc<watch::WatchPage>,
+    /// Umgibt die Ansehen-Seite für die Öffnen-/Miniplayer-Animation.
+    zoom: fly::Zoom,
     /// Knöpfe im Miniplayer (Pause, Ton, Zurück zum Video, Schließen).
     mini_bar: gtk::Box,
 }
@@ -107,13 +110,17 @@ impl Nav {
             self.close_mini();
         }
         self.watch.widget.set_visible(watch || self.watch.is_mini());
-        if appear {
+        if appear && !self.zoom.animating() {
             // Die CSS-Animation startet nur neu, wenn sich ihr Name ändert: zwischen a und b wechseln.
             let w = &self.watch.widget;
             let a = w.has_css_class("page-in-a");
             w.remove_css_class(if a { "page-in-a" } else { "page-in-b" });
             w.add_css_class(if a { "page-in-b" } else { "page-in-a" });
         }
+        // Von/zur Ansehen-Seite ohne Überblendung: die liegt als eigene Ebene darüber (Zoom-Animation),
+        // im Stack steht nur ein leerer Platzhalter. Mit Überblendung wäre es beim Schrumpfen dahinter schwarz.
+        let fade = !watch && self.current() != "watch";
+        self.stack.set_transition_type(if fade { gtk::StackTransitionType::Crossfade } else { gtk::StackTransitionType::None });
         self.stack.set_visible_child_name(page);
         self.back.set_visible(!self.history.borrow().is_empty());
 
@@ -127,7 +134,14 @@ impl Nav {
     }
 
     fn set_mini(&self, on: bool) {
+        // Wechsel groß ↔ klein bei laufendem Video: die Seite schrumpft/wächst vom alten Platz aus.
+        let from = (self.watch.is_mini() != on && self.player.active()).then(|| self.zoom.anchor_bounds()).flatten();
+        // Beim Großwerden bleibt die Seite darunter (Raster) stehen, bis die Animation fertig ist.
+        let backdrop = from.filter(|_| !on).and_then(|_| self.zoom.backdrop(&self.stack));
         self.watch.set_mini(on);
+        if let Some(from) = from {
+            self.zoom.animate_from(from, backdrop);
+        }
         self.mini_bar.set_visible(on);
         // Die große Leiste passt nicht in den kleinen Player.
         self.player.controls.widget.set_visible(!on);
@@ -382,25 +396,33 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     });
     let watch = watch::WatchPage::new(&player.widget, open_channel_late.clone(), on_link);
 
-    // Miniplayer: kleine Bubble im Video. Die Symbole folgen den Knöpfen der großen Leiste.
+    // Miniplayer-Knöpfe in den Ecken, je eine Bubble: oben links groß machen, oben rechts schließen,
+    // unten links Play und Ton. Die Symbole folgen den Knöpfen der großen Leiste.
     let mini_bar = gtk::Box::builder()
-        .spacing(2)
-        .height_request(32)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::End)
+        .orientation(gtk::Orientation::Vertical)
+        .margin_start(8)
+        .margin_end(8)
+        .margin_top(8)
         .margin_bottom(8)
-        .css_classes(["bubble"])
         .visible(false)
         .build();
+    let bubble = || gtk::Box::builder().spacing(2).height_request(32).css_classes(["bubble"]).build();
+    let (mini_top_left, mini_top_right, mini_bottom) = (bubble(), bubble(), bubble());
     let mini_play = nav_button("tubequ-pause-symbolic", "Play/Pause");
     player.controls.play.bind_property("icon-name", &mini_play, "icon-name").sync_create().build();
     let mini_mute = nav_button("tubequ-volume-symbolic", "Mute");
     player.controls.mute.bind_property("icon-name", &mini_mute, "icon-name").sync_create().build();
     let mini_open = nav_button("tubequ-fullscreen-symbolic", "Back to video");
     let mini_close = nav_button("tubequ-close-symbolic", "Close");
-    for b in [&mini_play, &mini_mute, &mini_open, &mini_close] {
-        mini_bar.append(b);
-    }
+    mini_top_left.append(&mini_open);
+    mini_top_right.append(&mini_close);
+    mini_bottom.append(&mini_play);
+    mini_bottom.append(&mini_mute);
+    let top = gtk::CenterBox::builder().start_widget(&mini_top_left).end_widget(&mini_top_right).valign(gtk::Align::Start).vexpand(true).build();
+    mini_bottom.set_halign(gtk::Align::Start);
+    mini_bottom.set_valign(gtk::Align::End);
+    mini_bar.append(&top);
+    mini_bar.append(&mini_bottom);
     mini_play.connect_clicked({
         let mpv = player.mpv;
         move |_| {
@@ -413,7 +435,53 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     });
     watch.widget.add_overlay(&mini_bar);
     // Über den Seiten, unter Navigation (wird beim Seitenwechsel neu obenauf gelegt) und Suche.
-    page_layer.add_overlay(&watch.widget);
+    // In `Zoom` verpackt: geht beim Öffnen aus der Karte auf, Miniplayer ebenso (fly.rs).
+    let zoom = fly::Zoom::new(&watch.widget, &player.widget);
+    page_layer.add_overlay(&zoom);
+    // Miniplayer ziehen; beim Loslassen gleitet er in die nächste Ecke.
+    let drag = gtk::GestureDrag::new();
+    drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let dragging = Rc::new(Cell::new(false));
+    drag.connect_drag_update({
+        let (watch, zoom, dragging) = (watch.clone(), zoom.clone(), dragging.clone());
+        move |g, dx, dy| {
+            if !watch.is_mini() {
+                return;
+            }
+            // Erst ab ein paar Pixeln ist es Ziehen; sonst bleibt es ein Klick (Knöpfe im Miniplayer).
+            if !dragging.get() && dx.hypot(dy) < 8.0 {
+                return;
+            }
+            if !dragging.get() {
+                dragging.set(true);
+                g.set_state(gtk::EventSequenceState::Claimed);
+            }
+            zoom.set_offset(dx as f32, dy as f32);
+        }
+    });
+    // Loslassen nach Ziehen um (dx, dy): in die nächste Ecke gleiten.
+    let snap: Rc<dyn Fn(f32, f32)> = Rc::new({
+        let (watch, zoom) = (watch.clone(), zoom.clone());
+        move |dx, dy| {
+            zoom.set_offset(0.0, 0.0);
+            let (Some(player), Some(page)) = (zoom.anchor_bounds(), watch.widget.compute_bounds(&zoom)) else { return };
+            // Nächste Ecke = Seite, auf der die Mitte des Miniplayers jetzt liegt.
+            let right = page.x() + dx + page.width() / 2.0 > zoom.width() as f32 / 2.0;
+            let bottom = page.y() + dy + page.height() / 2.0 > zoom.height() as f32 / 2.0;
+            watch.set_corner(right, bottom);
+            let from = gtk::graphene::Rect::new(player.x() + dx, player.y() + dy, player.width(), player.height());
+            zoom.animate_from(from, None);
+        }
+    });
+    drag.connect_drag_end({
+        let snap = snap.clone();
+        move |_, dx, dy| {
+            if dragging.replace(false) {
+                snap(dx as f32, dy as f32);
+            }
+        }
+    });
+    watch.widget.add_controller(drag);
 
     let nav = Rc::new(Nav {
         stack: stack.clone(),
@@ -426,6 +494,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         page_layer: page_layer.clone(),
         in_player: std::cell::Cell::new(false),
         watch: watch.clone(),
+        zoom: zoom.clone(),
         mini_bar: mini_bar.clone(),
     });
     mini_open.connect_clicked({
@@ -437,11 +506,20 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |_| nav.close_mini()
     });
     // Beim Video: Navigation blendet sich zusammen mit der Player-Leiste ein und aus.
+    // Offenes Menü hält die Navigation sichtbar, auch wenn sich die Leiste ausblendet.
     player.controls.widget.connect_reveal_child_notify({
-        let nav = nav.clone();
+        let (nav, menu) = (nav.clone(), menu.clone());
         move |r| {
             if nav.in_player.get() {
-                nav.nav_bar.set_reveal_child(r.reveals_child());
+                nav.nav_bar.set_reveal_child(r.reveals_child() || menu.reveals_child());
+            }
+        }
+    });
+    menu.connect_reveal_child_notify({
+        let (nav, player) = (nav.clone(), player.clone());
+        move |m| {
+            if nav.in_player.get() {
+                nav.nav_bar.set_reveal_child(m.reveals_child() || player.controls.widget.reveals_child());
             }
         }
     });
@@ -450,8 +528,17 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     let play: Rc<dyn Fn(Video)> = Rc::new({
         let (nav, player, watch) = (nav.clone(), player.clone(), watch.clone());
         move |v: Video| {
+            // Seite geht aus dem Vorschaubild der angeklickten Karte auf (vor dem Seitenwechsel messen).
+            let from = fly::thumb_bounds(&v.id, &nav.zoom);
+            let backdrop = from.and_then(|_| nav.zoom.backdrop(&nav.stack));
             watch.show(&v);
             nav.go("watch");
+            if let Some(from) = from {
+                // Nach `go`: übernimmt auch einen Miniplayer-Übergang; die Einblendung von `show` braucht es dann nicht.
+                nav.zoom.animate_from(from, backdrop);
+                nav.watch.widget.remove_css_class("page-in-a");
+                nav.watch.widget.remove_css_class("page-in-b");
+            }
             // Fenstertitel = Videotitel (Alt-Tab, Fensterliste); „Tubequ“ bleibt hinten dran.
             if !v.title.is_empty() {
                 nav.window.set_title(Some(&format!("{} – Tubequ", v.title)));
@@ -728,8 +815,85 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
 
     // Tastenkürzel. Tippt man im Suchfeld, kommen die Tasten hier nicht an.
     let keys = gtk::EventControllerKey::new();
+    // Menü per Tastatur (Esc auf der Startseite): Pfeile hoch/runter wählen, Enter/Leertaste drückt,
+    // Esc klappt zu. Die Knöpfe sind sonst nicht fokussierbar (Maus-Bedienung), nur solange so geöffnet.
+    let col_all = [later_button.clone(), history_button.clone(), account_button.clone()];
+    let top_all = [back.clone(), home.clone(), search_button.clone()];
+    let menu_key: Rc<dyn Fn(gdk::Key) -> bool> = Rc::new({
+        let (window, menu, set_menu, account) = (window.clone(), menu.clone(), set_menu.clone(), account_button.clone());
+        move |key| {
+            let shown = |b: &&gtk::Button| b.is_visible() && b.parent().is_some_and(|p| p.is_visible());
+            // Spalte (Watch later, History, Konto) und obere Reihe (Zurück, Home, Suche).
+            let col: Vec<&gtk::Button> = col_all.iter().filter(shown).collect();
+            let top: Vec<&gtk::Button> = top_all.iter().filter(shown).collect();
+            let close = || {
+                set_menu(false);
+                for b in col_all.iter().chain(&top_all) {
+                    b.set_focusable(false);
+                }
+                gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+            };
+            let go = |b: Option<&&gtk::Button>| {
+                if let Some(b) = b {
+                    b.grab_focus();
+                }
+            };
+            if !menu.reveals_child() {
+                // Esc: aufklappen, erster Eintrag gewählt.
+                if key != gdk::Key::Escape {
+                    return false;
+                }
+                set_menu(true);
+                for b in col_all.iter().chain(&top_all) {
+                    b.set_focusable(true);
+                }
+                // Markierung des gewählten Knopfs zeigen (`:focus-visible`).
+                window.set_focus_visible(true);
+                go(col.first());
+                return true;
+            }
+            let focus = gtk::prelude::GtkWindowExt::focus(&window);
+            let is = |b: &&gtk::Button| focus.as_ref().is_some_and(|f| f == b.upcast_ref::<gtk::Widget>());
+            let (in_col, in_top) = (col.iter().position(is), top.iter().position(is));
+            let down = key == gdk::Key::Down;
+            match key {
+                gdk::Key::Escape => close(),
+                // Hoch/runter: in der Spalte mit Umlauf; aus der oberen Reihe runter in die Spalte.
+                gdk::Key::Up | gdk::Key::Down => match (in_col, in_top) {
+                    (Some(i), _) => {
+                        let n = col.len();
+                        go(col.get(if down { (i + 1) % n } else { (i + n - 1) % n }));
+                    }
+                    (None, Some(_)) if !down => {}
+                    _ => go(col.first()),
+                },
+                // Rechts: aus der Spalte in die obere Reihe, dort weiter; links zurück (am Anfang in die Spalte).
+                gdk::Key::Right => match (in_col, in_top) {
+                    (_, Some(i)) => go(top.get(i + 1)),
+                    (Some(_), _) => go(top.first()),
+                    _ => go(col.first()),
+                },
+                gdk::Key::Left => match in_top {
+                    Some(0) => go(col.first()),
+                    Some(i) => go(top.get(i - 1)),
+                    None => {}
+                },
+                gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space => {
+                    let Some(b) = col.iter().chain(&top).find(|b| is(b)).map(|b| (*b).clone()) else { return false };
+                    // Konto klappt die Kontoliste auf (Menü bleibt offen), sonst schließt der Klick das Menü.
+                    if b != account {
+                        close();
+                    }
+                    b.emit_clicked();
+                }
+                _ => return false,
+            }
+            true
+        }
+    });
     keys.connect_key_pressed({
         let (nav, window, player, search) = (nav.clone(), window.clone(), player.clone(), search.clone());
+        let (menu_key, menu) = (menu_key.clone(), menu.clone());
         let (play, open_channel) = (play.clone(), open_channel.clone());
         let reload_page = reload_page.clone();
         move |_, key, _, mods| {
@@ -776,6 +940,15 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 return glib::Propagation::Proceed;
             }
             let watching = nav.current() == "watch";
+            // Menü offen: Pfeile/Enter/Esc gehören ihm. Esc öffnet es beim Video (außer im Vollbild: das
+            // verlässt Esc zuerst) und auf der Startseite (kein Zurück); sonst bleibt Esc „Zurück“.
+            let home = nav.current() == "browse" && nav.history.borrow().is_empty();
+            let menu_esc = key == gdk::Key::Escape && !window.is_fullscreen() && (watching || home);
+            if (menu.reveals_child() || menu_esc) && mods.is_empty() && menu_key(key) {
+                return glib::Propagation::Stop;
+            }
+            // Miniplayer: nur die Video-Tasten; Pfeile/Ziffern bleiben fürs Raster.
+            let mini = !watching && nav.watch.is_mini();
             let handled = match key {
                 gdk::Key::Escape if window.is_fullscreen() => {
                     window.unfullscreen();
@@ -793,6 +966,16 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                     player.controls.fullscreen.emit_clicked();
                     true
                 }
+                // f: zurück zum großen Video (Ansehen-Seite, kein Vollbild); q: Miniplayer schließen (wie in mpv).
+                gdk::Key::f if mini => {
+                    nav.go("watch");
+                    true
+                }
+                gdk::Key::q if mini => {
+                    nav.close_mini();
+                    true
+                }
+                gdk::Key::space | gdk::Key::k | gdk::Key::m if mini => player.key(key),
                 k if watching => player.key(k),
                 // Pfeiltasten, solange nichts auf der Seite gewählt ist (nach dem Start, mit Miniplayer):
                 // erste Karte wählen, danach navigiert GTK selbst im Raster weiter (Enter öffnet).

@@ -17,7 +17,7 @@ use libmpv2::events::PropertyData;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const HIDE_AFTER: Duration = Duration::from_millis(2000);
 /// Beim Ziehen an der Timeline: so lange still halten, bevor gesprungen wird.
@@ -152,7 +152,7 @@ fn lang_label(l: &str) -> String {
 }
 
 /// Lücke zwischen den Kapitel-Abschnitten der Timeline (px) und wie viel dicker der Abschnitt unter der Maus wird.
-const CHAPTER_GAP: f64 = 3.0;
+const CHAPTER_GAP: f64 = 1.0;
 const CHAPTER_HOVER_GROW: f64 = 2.0;
 /// Strg+← springt an den Anfang des aktuellen Kapitels; nur in den ersten Sekunden ins vorige (wie YouTube/mpv).
 const CHAPTER_BACK_THRESHOLD: f64 = 3.0;
@@ -199,15 +199,15 @@ fn chapter_spans(chapters: &[(f64, String)], dur: f64, left: f64, width: f64) ->
         .collect()
 }
 
-/// Rechteck mit runden Ecken als Pfad.
-fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    let r = r.min(w / 2.0).min(h / 2.0);
+/// Rechteck als Pfad, links mit Rundung `rl`, rechts mit `rr` (0 = eckig).
+fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, rl: f64, rr: f64) {
+    let (rl, rr) = (rl.min(w / 2.0).min(h / 2.0), rr.min(w / 2.0).min(h / 2.0));
     let pi = std::f64::consts::PI;
     cr.new_sub_path();
-    cr.arc(x + w - r, y + r, r, -pi / 2.0, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, pi / 2.0);
-    cr.arc(x + r, y + h - r, r, pi / 2.0, pi);
-    cr.arc(x + r, y + r, r, pi, 1.5 * pi);
+    cr.arc(x + w - rr, y + rr, rr, -pi / 2.0, 0.0);
+    cr.arc(x + w - rr, y + h - rr, rr, 0.0, pi / 2.0);
+    cr.arc(x + rl, y + h - rl, rl, pi / 2.0, pi);
+    cr.arc(x + rl, y + rl, rl, pi, 1.5 * pi);
     cr.close_path();
 }
 
@@ -247,6 +247,8 @@ pub struct Controls {
     sheets: Rc<RefCell<HashMap<usize, Option<Pixbuf>>>>,
     segment_layer: gtk::DrawingArea,
     pos: Cell<f64>,
+    /// Ziel eines Timeline-Sprungs und wann er an mpv ging (`None` = wartet noch auf `SEEK_DELAY`).
+    seek_target: Rc<Cell<Option<(f64, Option<Instant>)>>>,
     dur: Cell<f64>,
     speed: Cell<f64>,
     /// Ton aus (von mpv gemeldet) und laufende Ein-/Ausblendung bzw. Lautstärke-Rampe (Nummer, damit eine
@@ -339,18 +341,23 @@ impl Controls {
         // Beim Ziehen nicht bei jeder Bewegung springen (jeder Sprung lädt neu), sondern erst,
         // wenn die Maus kurz still steht oder losgelassen wird. Die Zeit folgt sofort.
         let pending_seek: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+        // Sprungziel, bis mpv dort ankommt: so lange zeigt die Timeline nicht die alte Position (`seek_state`).
+        let seek_target: Rc<Cell<Option<(f64, Option<Instant>)>>> = Rc::default();
         seek.connect_change_value({
             let time = time.downgrade();
+            let seek_target = seek_target.clone();
             move |s, _, v| {
+                seek_target.set(Some((v, None)));
                 if let Some(t) = time.upgrade() {
                     t.set_text(&format!("{} / {}", fmt_duration(v.max(0.0) as u32), fmt_duration(s.adjustment().upper() as u32)));
                 }
                 if let Some(id) = pending_seek.take() {
                     id.remove();
                 }
-                let pending = pending_seek.clone();
+                let (pending, seek_target) = (pending_seek.clone(), seek_target.clone());
                 let id = glib::timeout_add_local_once(SEEK_DELAY, move || {
                     pending.take();
+                    seek_target.set(Some((v, Some(Instant::now()))));
                     let _ = mpv.command("seek", &[&v.to_string(), "absolute"]);
                 });
                 pending_seek.replace(Some(id));
@@ -542,9 +549,12 @@ impl Controls {
                 if seek.has_css_class("chapters") {
                     let spans = chapter_spans(&chapters.borrow(), dur, r.x() as f64, r.width() as f64);
                     let hovered = hover_x.get();
-                    for (x0, x1) in &spans {
+                    // Rund nur an Anfang und Ende der ganzen Timeline, an Kapitelgrenzen eckig.
+                    let last = spans.len().saturating_sub(1);
+                    for (i, (x0, x1)) in spans.iter().enumerate() {
                         let grow = if hovered.is_some_and(|x| x >= *x0 - CHAPTER_GAP / 2.0 && x <= *x1 + CHAPTER_GAP / 2.0) { CHAPTER_HOVER_GROW } else { 0.0 };
-                        rounded(cr, *x0, y - grow, x1 - x0, h + 2.0 * grow, h / 2.0);
+                        let (hh, r) = (h + 2.0 * grow, (h + 2.0 * grow) / 2.0);
+                        rounded(cr, *x0, y - grow, x1 - x0, hh, if i == 0 { r } else { 0.0 }, if i == last { r } else { 0.0 });
                     }
                     cr.clip();
                     let (top, height) = (y - CHAPTER_HOVER_GROW, h + 2.0 * CHAPTER_HOVER_GROW);
@@ -675,6 +685,7 @@ impl Controls {
             storyboard,
             sheets,
             pos: Cell::new(0.0),
+            seek_target,
             dur: Cell::new(0.0),
             speed: Cell::new(1.0),
             muted: Cell::new(false),
@@ -877,6 +888,14 @@ impl Controls {
         match (name, data) {
             ("time-pos", PropertyData::Double(t)) => {
                 self.pos.set(t);
+                // Nach einem Klick in die Timeline: alte Positionen nicht anzeigen, bis mpv am Ziel ist.
+                if let Some((target, sent)) = self.seek_target.get() {
+                    match seek_state(t, target, sent.map(|s| s.elapsed())) {
+                        Seek::Hold => return,
+                        Seek::Show => {}
+                        Seek::Done => self.seek_target.set(None),
+                    }
+                }
                 // Während der Nutzer den Regler zieht, nicht dazwischenfunken.
                 if !self.seek.state_flags().contains(gtk::StateFlags::ACTIVE) {
                     self.seek.set_value(t);
@@ -948,8 +967,53 @@ impl Controls {
     }
 }
 
+/// Was die Timeline nach einem Sprung zu `target` mit der gemeldeten Position `pos` macht.
+#[derive(Debug, PartialEq)]
+enum Seek {
+    /// Ziel weiter zeigen (alte Position oder Schlüsselbild vor dem Ziel).
+    Hold,
+    /// `pos` zeigen, Ziel aber gemerkt lassen: mpv meldet nach dem Sprung erst das Ziel, dann das Schlüsselbild davor.
+    Show,
+    /// Sprung erledigt, wieder normal.
+    Done,
+}
+
+/// Noch nicht an mpv gesendet (`since_sent` = `None`): Ziel zeigen. mpv springt zum Schlüsselbild vor dem Ziel
+/// (`hr-seek=no`) und spielt von dort hin: bis 1 s hinter dem Ziel nie etwas davor zeigen (spätestens nach 15 s
+/// aufgeben). Weit weg (alte Position vor dem Sprung): nur 2 s ignorieren – danach ein anderer Sprung (Tasten).
+fn seek_state(pos: f64, target: f64, since_sent: Option<Duration>) -> Seek {
+    let Some(d) = since_sent else { return Seek::Hold };
+    if pos >= target + 1.0 {
+        Seek::Done
+    } else if pos >= target {
+        Seek::Show
+    } else if pos >= target - 10.0 {
+        if d > Duration::from_secs(15) { Seek::Done } else { Seek::Hold }
+    } else if d > Duration::from_secs(2) {
+        Seek::Done
+    } else {
+        Seek::Hold
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn seek_holds_target() {
+        use super::{seek_state, Seek};
+        use std::time::Duration;
+        let ms = |n| Some(Duration::from_millis(n));
+        assert_eq!(seek_state(30.0, 90.0, None), Seek::Hold); // noch nicht gesendet
+        assert_eq!(seek_state(30.0, 90.0, ms(100)), Seek::Hold); // alte Position
+        assert_eq!(seek_state(90.0, 90.0, ms(0)), Seek::Show); // mpv meldet erst das Ziel …
+        assert_eq!(seek_state(83.4, 90.0, ms(50)), Seek::Hold); // … dann das Schlüsselbild davor: Ziel halten
+        assert_eq!(seek_state(89.8, 90.0, ms(3500)), Seek::Hold); // knapp davor: würde als 1:29 erscheinen
+        assert_eq!(seek_state(90.3, 90.0, ms(3500)), Seek::Show); // am Ziel angekommen
+        assert_eq!(seek_state(91.2, 90.0, ms(4500)), Seek::Done); // darüber hinaus: fertig
+        assert_eq!(seek_state(30.0, 90.0, ms(2500)), Seek::Done); // weit weg nach 2 s: anderer Sprung
+        assert_eq!(seek_state(86.5, 90.0, ms(16000)), Seek::Done); // hängt: aufgeben
+    }
     use super::*;
 
     #[test]

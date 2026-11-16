@@ -139,6 +139,7 @@ fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk
         .css_classes(["thumb"])
         .build();
     load_thumb(&pic, v.id.clone());
+    crate::fly::register(&v.id, &pic);
 
     // Grauer Platzhalter in Bildgröße, bis das Bild da ist; schneidet auch den Hover-Zoom ab.
     let thumb = gtk::Overlay::builder().child(&pic).overflow(gtk::Overflow::Hidden).css_classes(["thumb-box"]).build();
@@ -204,7 +205,7 @@ fn part(k: i32, n: i32, height: i32) -> gtk::Grid {
     g
 }
 
-fn load_thumb(pic: &gtk::Picture, id: String) {
+pub fn load_thumb(pic: &gtk::Picture, id: String) {
     // Unsichtbar bis zum Laden, dann einblenden (style.css `.fade`).
     pic.add_css_class("fade");
     let pic = pic.downgrade();

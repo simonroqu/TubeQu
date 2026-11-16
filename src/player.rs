@@ -32,6 +32,8 @@ pub struct Player {
     /// Wird mit `true` aufgerufen, solange ein Video läuft (Bildschirmschoner aus), sonst `false`.
     on_playing: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
     spinner: gtk::Image,
+    /// Vorschaubild des Videos, solange es lädt (aus dem Thumbnail-Cache, keine YouTube-Anfrage).
+    poster: gtk::Picture,
     /// Wird mit dem Seitenverhältnis (Breite/Höhe) aufgerufen, sobald das Video es kennt.
     on_aspect: Rc<RefCell<Option<Box<dyn Fn(f64)>>>>,
     /// Bekommt das yt-dlp-JSON des Videos (holt mpv beim Laden ohnehin), z. B. als Ersatz-Details.
@@ -57,6 +59,17 @@ struct Track {
     retried: bool,
     /// Wann `play` lief: kurz danach keine Einblendungen (Geschwindigkeit/Lautstärke setzt `play` selbst).
     started: Option<Instant>,
+}
+
+/// Untertitel-Optionen für yt-dlp (Teil von `ytdl-raw-options`).
+const SUBS_RAW: &str = "write-auto-subs=,sub-langs=(de|en).*";
+
+/// `loadfile`-Optionen für den zweiten Versuch mit Browser-Login. Der Wert enthält Kommas, darum
+/// mpvs Längen-Schreibweise `%n%wert` (sonst trennt mpv die Optionen dort).
+fn with_login(opts: &str, login: &str) -> String {
+    let raw = format!("{SUBS_RAW},{login}");
+    let raw = format!("ytdl-raw-options=%{}%{raw}", raw.len());
+    if opts.is_empty() { raw } else { format!("{opts},{raw}") }
 }
 
 /// Kurzer Hinweis oben links über dem Video, verschwindet nach ein paar Sekunden von selbst.
@@ -203,7 +216,10 @@ impl Player {
                 // Untertitel: auch automatische, aber nur Deutsch/Englisch (sonst ~100 Übersetzungen).
                 // Geladen wird eine Spur erst beim Einschalten (Taste c) – keine Extra-Anfrage beim Start.
                 // Wert ohne Komma: mpv trennt die Optionen an Kommas.
-                i.set_property("ytdl-raw-options", "write-auto-subs=,sub-langs=(de|en).*")?;
+                // ponytail: player_client=visionos – seit yt-dlp 2026.10.26 liefern die Standard-Clients
+                // (tv_samsung) Stream-URLs, die mpv mit 403 abgewiesen werden. visionos braucht keinen
+                // PO-Token und liefert HLS. Wenn auch das kippt: Client-Liste in yt-dlp `_DEFAULT_CLIENTS` prüfen.
+                i.set_property("ytdl-raw-options", format!("{SUBS_RAW},extractor-args=youtube:player_client=visionos"))?;
                 // Medientasten und Anzeige in der Leiste (MPRIS), falls das mpv-mpris-Plugin installiert ist.
                 if std::path::Path::new(MPRIS_PLUGIN).exists() {
                     i.set_property("scripts", MPRIS_PLUGIN)?;
@@ -323,6 +339,10 @@ impl Player {
         click.connect_pressed({
             let (controls, flash) = (controls.clone(), flash.clone());
             move |g, n, x, _| {
+                // Im Miniplayer: Ziehen statt Pause (Pause über den Knopf im Miniplayer).
+                if g.widget().is_some_and(|w| in_mini(&w)) {
+                    return;
+                }
                 let _ = mpv.command("cycle", &["pause"]);
                 if n == 2 {
                     let w = g.widget().map_or(1, |w| w.width()) as f64;
@@ -348,9 +368,17 @@ impl Player {
 
         // Mausbewegung über dem Video blendet die Leiste ein.
         let motion = gtk::EventControllerMotion::new();
+        // Nur echte Bewegung zählt: GTK schickt nach Änderungen im Layout (Zeit, Timeline, Ein-/Ausblenden)
+        // Bewegungs-Ereignisse an derselben Stelle nach, die Leiste bliebe sonst für immer sichtbar.
+        let last = std::cell::Cell::new((f64::NAN, f64::NAN));
         motion.connect_motion({
             let controls = controls.clone();
-            move |_, _, _| controls.poke()
+            move |_, x, y| {
+                let (lx, ly) = last.replace((x, y));
+                if (x - lx).abs() >= 1.0 || (y - ly).abs() >= 1.0 || lx.is_nan() {
+                    controls.poke();
+                }
+            }
         });
         // Maus verlässt den Player: Leiste sofort weg.
         motion.connect_leave({
@@ -387,6 +415,9 @@ impl Player {
         msg_box.append(&msg);
         msg_box.append(&retry);
         widget.set_child(Some(&area));
+        // Vorschaubild unter Meldung/Spinner, bis das Video geladen ist (`play` zeigt es, `FileLoaded` blendet es aus).
+        let poster = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_target(false).visible(false).build();
+        widget.add_overlay(&poster);
         widget.add_overlay(&msg_box);
         // Laden: nur ein Spinner, kein Text.
         let spinner = crate::icons::spinner(32).halign(gtk::Align::Center).valign(gtk::Align::Center).visible(false).build();
@@ -429,6 +460,7 @@ impl Player {
             let msg = msg.clone();
             let retry = retry.clone();
             let spinner = spinner.clone();
+            let poster = poster.clone();
             let on_aspect = on_aspect.clone();
             let on_info = on_info.clone();
             let on_playing = on_playing.clone();
@@ -458,6 +490,7 @@ impl Player {
                             Ok(Event::FileLoaded) => {
                                 loaded = true;
                                 spinner.set_visible(false);
+                                poster.set_visible(false);
                                 controls.load_chapters();
                             }
                             Ok(Event::LogMessage { text, .. }) => log.push(text.trim().to_string()),
@@ -558,9 +591,18 @@ impl Player {
                                 eprintln!("Video-Fehler: {log:?}");
                                 // YouTube verweigert gelegentlich einzelne Stream-Server kurzzeitig.
                                 // Einmal neu laden holt frische Adressen; erst dann den Fehler zeigen.
+                                // Altersbeschränkt: der eine Versuch läuft stattdessen mit Browser-Login.
+                                let login = log
+                                    .iter()
+                                    .any(|l| l.contains("confirm your age"))
+                                    .then(crate::youtube::login_ytdl_options)
+                                    .flatten();
                                 let again = {
                                     let mut t = track.borrow_mut();
-                                    let again = (!t.retried).then(|| t.load.clone()).flatten();
+                                    let again = (!t.retried).then(|| t.load.clone()).flatten().map(|(url, opts)| match &login {
+                                        Some(l) => (url, with_login(&opts, l)),
+                                        None => (url, opts),
+                                    });
                                     t.retried = true;
                                     again
                                 };
@@ -579,7 +621,7 @@ impl Player {
             }
         });
 
-        Player { mpv, widget, controls, area, msg, retry, end_home, flash, on_playing, spinner, on_aspect, on_info, track, gl_ready, pending }
+        Player { mpv, widget, controls, area, msg, retry, end_home, flash, on_playing, spinner, poster, on_aspect, on_info, track, gl_ready, pending }
     }
 
     /// Video-Fläche schon beim App-Start einrichten (OpenGL + mpv-Render-Kontext, gemessen ~120 ms im
@@ -654,6 +696,15 @@ impl Player {
         // Geschwindigkeit, die zuletzt für diesen Kanal gewählt wurde (sonst normal).
         let speed = video.as_ref().and_then(|v| v.channel_id.as_deref()).map_or(1.0, crate::lists::channel_speed);
         let _ = self.mpv.set_property("speed", speed);
+        // Vorschaubild, bis das Video lädt; das alte erst entfernen, sonst blitzt es kurz auf.
+        // ponytail: kein ID-Abgleich – kommt das Bild eines vorigen Videos verspätet an, steht es kurz da.
+        // Unkritisch, die Bilder liegen meist schon im Cache (Raster).
+        self.poster.set_paintable(None::<&gdk::Paintable>);
+        self.poster.remove_css_class("loaded");
+        self.poster.set_visible(video.is_some());
+        if let Some(v) = &video {
+            crate::grid::load_thumb(&self.poster, v.id.clone());
+        }
         self.track.replace(Track { video, live, started: Some(Instant::now()), ..Default::default() });
         self.controls.reset(live);
         self.area.grab_focus();
@@ -685,6 +736,7 @@ impl Player {
         self.track.replace(Track::default());
         self.pending.take();
         let _ = self.mpv.command("stop", &[]);
+        self.poster.set_visible(false);
         self.msg.set_visible(false);
         self.retry.set_visible(false);
         self.spinner.set_visible(false);
@@ -769,6 +821,11 @@ impl Player {
     }
 }
 
+/// Liegt `w` im Miniplayer (Ansehen-Seite mit Klasse `mini`)?
+fn in_mini(w: &gtk::Widget) -> bool {
+    std::iter::successors(Some(w.clone()), |w| w.parent()).any(|w| w.has_css_class("mini"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::reason;
@@ -798,5 +855,13 @@ mod tests {
         assert_eq!(reason(&bot, "x"), "Sign in to confirm you're not a bot. Use --cookies");
         assert_eq!(reason(&l(&["Failed to recognize file format."]), "x"), "Failed to recognize file format.");
         assert_eq!(reason(&[], "fallback"), "fallback");
+    }
+
+    #[test]
+    fn login_opts_escaped() {
+        let raw = format!("{},cookies-from-browser=x", super::SUBS_RAW);
+        let want = format!("ytdl-raw-options=%{}%{raw}", raw.len());
+        assert_eq!(super::with_login("", "cookies-from-browser=x"), want);
+        assert_eq!(super::with_login("start=12.0", "cookies-from-browser=x"), format!("start=12.0,{want}"));
     }
 }

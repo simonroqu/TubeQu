@@ -786,6 +786,14 @@ fn account_header() -> String {
     format!("X-Goog-AuthUser:{}", account())
 }
 
+/// Zusätzliche `ytdl-raw-options` für mpv, um mit Browser-Login abzuspielen (altersbeschränkte Videos:
+/// „Sign in to confirm your age“). `None` = kein Browser gefunden. Client `tv`: unterstützt Cookies und
+/// braucht keinen PO-Token (`visionos` ignoriert Cookies).
+pub fn login_ytdl_options() -> Option<String> {
+    let c = COOKIES.as_deref()?;
+    Some(format!("cookies-from-browser={c},add-header={},extractor-args=youtube:player_client=tv", account_header()))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Account {
     pub index: u32,

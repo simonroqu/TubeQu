@@ -103,6 +103,12 @@ progressbar.watched trough {
   background: rgba(255, 255, 255, 0.14);
 }
 
+/* Per Tastatur gewählter Knopf (Menü über Esc): wie Hover. */
+.bubble button:focus-visible {
+  background: rgba(255, 255, 255, 0.14);
+  outline: none;
+}
+
 .bubble button:active {
   background: rgba(255, 255, 255, 0.24);
 }
@@ -301,7 +307,7 @@ flowboxchild:focus-visible {
   outline-offset: 2px;
 }
 
-/* Ansehen-Seite blendet ein (main.rs `Nav::show`), Miniplayer gleitet in die Ecke. */
+/* Ansehen-Seite blendet ein (main.rs `Nav::show`); Miniplayer/Karte → Player fliegen (fly.rs). */
 @keyframes page-in-a {
   from { opacity: 0; }
 }
@@ -318,13 +324,6 @@ flowboxchild:focus-visible {
   animation: page-in-b 180ms ease-out;
 }
 
-@keyframes mini-in {
-  from { opacity: 0; transform: translate(40px, 40px) scale(0.85); }
-}
-
-.mini {
-  animation: mini-in 250ms ease-out;
-}
 
 /* Lade-Platzhalter der Ansehen-Seite (watch.rs `skeleton`): graue Blöcke in Form der Infos,
    ein heller Streifen läuft von links nach rechts durch. */
