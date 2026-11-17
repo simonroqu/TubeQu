@@ -62,7 +62,7 @@ Double-click left/right on the player seeks −/+10 s, the middle toggles fullsc
 ## Disclaimer
 
 Tubequ is not affiliated with, endorsed by or sponsored by YouTube or Google. "YouTube" is a trademark of Google LLC.
-Use it in accordance with the terms of the services you access.
+Tubequ does not host any content. Use it in accordance with the laws of your country and the terms of the services you access.
 
 ## License
 
