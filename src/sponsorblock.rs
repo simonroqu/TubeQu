@@ -8,13 +8,7 @@ use std::sync::LazyLock;
 const CATEGORIES: [(&str, &str); 3] =
     [("sponsor", "sponsor"), ("selfpromo", "self-promotion"), ("interaction", "subscribe reminder")];
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Segment {
-    pub start: f64,
-    pub end: f64,
-    /// Anzeigename, z. B. „sponsor“.
-    pub label: &'static str,
-}
+pub use qu_core::segments::Segment;
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
@@ -50,15 +44,11 @@ fn parse(json: &serde_json::Value, video_id: &str) -> Vec<Segment> {
     out
 }
 
-/// Liegt `pos` in einem noch nicht übersprungenen Abschnitt? Dann dessen Index.
-/// Kurz vor dem Ende nicht mehr springen (sonst Sprung um Bruchteile einer Sekunde).
-pub fn to_skip(segments: &[Segment], skipped: &[usize], pos: f64) -> Option<usize> {
-    segments.iter().enumerate().position(|(i, s)| !skipped.contains(&i) && pos >= s.start && pos < s.end - 0.5)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qu_core::segments::to_skip;
 
     #[test]
     fn parses_and_decides() {

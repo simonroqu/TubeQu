@@ -2,7 +2,8 @@
 
 Eigene YouTube-App ohne Werbung, entwickelt auf Omarchy/Hyprland, läuft aber auch ohne Omarchy
 (eingebautes Standard-Theme). Startseite = persönliche YouTube-Empfehlungen, Suche mit Vorschlägen,
-Kanalseiten, eingebetteter Player mit eigener Bedienleiste. Schwester-App: AniQu (`~/Work/aniqu`).
+Kanalseiten, eingebetteter Player mit eigener Bedienleiste. Schwester-Apps: AniQu (`~/Work/aniqu`), BoxQu
+(`~/Work/boxqu`); gemeinsamer Unterbau über **qu-core** (`~/Work/quCore`).
 
 **Code-Kommentare: Deutsch. Alle Texte in der Oberfläche: Englisch** (auch Fehlermeldungen,
 Tooltips, „3 days ago“ usw.). Keine deutschen UI-Strings einführen.
@@ -43,19 +44,13 @@ Systemvoraussetzungen: `gtk4` (≥ 4.20), `mpv`/libmpv, `yt-dlp` + JS-Laufzeit (
 | `youtube.rs` | **Einzige Stelle, die mit YouTube spricht.** Rate-Limit, Cache, Suche, Vorschläge, Kanal, Details, Startseite (yt-dlp), Verlauf-Eintrag, Konto/Abonnieren (innertube), Thumbnails/Avatare |
 | `grid.rs` | Video-Raster (2 FlowBoxen + „Continue watching“ nach 4 Reihen), Karten, Nachladen beim Scrollen, `fmt_views`/`fmt_duration`/`fmt_ago` |
 | `channel.rs` | Kanalseite: Avatar, Name, Abonnentenzahl, Abo-Knopf, eigenes Raster (nur Videos, kein Live-Tab) |
-| `watch.rs` | Ansehen-Seite: Player in Videohöhe (keine Balken oben/unten), Titel, Kanalzeile, Beschreibung mit Links |
-| `player.rs` | libmpv eingebettet in `GtkGLArea` (OpenGL über EGL), Ereignisse, Fehleranzeige, Fortschritt speichern, SponsorBlock-Sprünge, Seitenverhältnis melden |
-| `controls.rs` | Bubble-Bedienleiste: Timeline (+Kapitel, +Sponsor-Bereiche), Play, Lautstärke, Zeit, Qualität/Geschwindigkeit, Vollbild; Auto-Ausblenden |
-| `search.rs` | Schwebendes Suchfenster (wie Spotlight) mit Vorschlägen; `/` oder `Strg+K` |
+| `player.rs` | Player-Anbindung an qu-core: `Hooks` (yt-dlp-Optionen, Fortschritt + „Watch later“ aufräumen, Position an YouTube, SponsorBlock, Tempo pro Kanal, zweiter Versuch mit Login), `play`/`reload`, yt-dlp-Qualität (`format_for`) |
+| `watch.rs` | Infos unter dem Video (Titel, Kanal, Beschreibung, Platzhalter bis Details da sind) im `WatchFrame` aus qu-core |
+| `qu.toml` | App-Konfiguration für qu-core: Name/Titel/ID/Startmenü-Texte, **Menü oben links** (`[nav]`), Suche, Player, Fortschrittsregeln, Raster. Format in `~/Work/quCore/CLAUDE.md`; Test `qu_toml` in `main.rs` prüft sie |
+| **qu-core** (`~/Work/quCore`) | Gemeinsamer Unterbau, **dort ändern**: App-Start (`start`, `--install`), Dateien/Tempo (`store`), Fortschrittsregeln (`progress`), Raster-Bausteine (`cards`), Fenster/Seitenverlauf/Miniplayer (`nav`), Player (`player`, `controls`, Rahmen `watch`), Menü (`navbar`), Ladeanzeige (`Busy`), `bg`, CSS-Schichten (`style`), `app` (Pfade), `theme`, gemeinsames CSS (`qu_core::CSS`), `icons` (`qu-*-symbolic`), `nav_shape`, `fly`, `smooth`, `search` (Suchfenster + Suchverlauf), `upscale` (Shader-Set hier: `UPSCALER` in `controls.rs`). Beschreibung in `~/Work/quCore/CLAUDE.md` |
 | `progress.rs` | Fortschritt pro Video in `~/.local/share/tubequ/progress.tsv` (+ Titel/Kanal/Datum für „Continue watching“) |
 | `lists.rs` | Watch later, letzte Suchen, Tempo pro Kanal |
 | `sponsorblock.rs` | SponsorBlock-Abschnitte (sponsor.ajay.app, Hash-Präfix, kein YouTube-Request) |
-| `theme.rs` | Farben aus Omarchy `colors.toml`, Rundung aus Theme-`hyprland.lua`, Live-Reload; Fallback = Farben von „Last Horizon“ |
-| `nav_shape.rs` | Selbst gezeichnete Form der Nav-Bubble: Pille → umgedrehtes L (Burger offen) → liegendes U (Kontoliste offen, `set_parts`) |
-| `fly.rs` | Öffnen-Animation wie beim iPhone: `Zoom` umgibt die Ansehen-Seite; der Player (Anker) beginnt genau auf dem Startrechteck (Karte bzw. alter Player-Platz) und wächst 380 ms an seinen Platz, die Seite skaliert mit, der Ausschnitt wächst vom Start auf die ganze Seite (nur Zeichnen, kein Layout pro Bild). Dahinter beim Großwerden ein abgedunkeltes Standbild der alten Seite (`backdrop`). Stack-Wechsel von/zur Ansehen-Seite **ohne** Überblendung (`Nav::show`), sonst ist es beim Schrumpfen dahinter schwarz. `contains` = false, damit der Zoom im Miniplayer-Modus keine Klicks schluckt. Aus bei `gtk-enable-animations=false` |
-| `smooth.rs` | Weiches Scrollen mit dem Mausrad, Tastatur-Fokus im Raster |
-| `icons.rs` | Eigene Symbol-Icons (`data/icons/*.svg`), eingebettet, beim Start nach `~/.cache/tubequ/icons` geschrieben; neue Icons in `ICONS` eintragen (Arraylänge!) |
-| `style.css` | Layout-CSS (Bubbles, Timeline, Suche …), nutzt `--radius-*`-Variablen aus `theme.rs` |
 
 Muster: Netzwerk nie im GTK-Thread. `glib::spawn_future_local(async { bg(fut).await })` –
 `bg()` führt auf tokio aus, Ergebnis kommt im GTK-Thread an. Verspätete Antworten werden per
@@ -158,18 +153,18 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   Hintergrund (6 px), weiß statt Signalfarben. Erscheint nur bei Mausbewegung **über dem
   Player**, weg nach 2 s oder sofort beim Verlassen; pausiert/Menü offen bleibt sie.
   Ruht die Maus 2 s, verschwindet auch die Hover-Hervorhebung (Klasse `idle` am Player).
-  Bewegung zählt nur bei geänderter Position (`player.rs`): GTK schickt nach Layout-Änderungen (Ein-/Ausblenden,
+  Bewegung zählt nur bei geänderter Position (qu-core `player.rs`): GTK schickt nach Layout-Änderungen (Ein-/Ausblenden,
   Zeit) Bewegungs-Ereignisse an derselben Stelle nach – sonst blendet sich die Leiste nie aus (wie AniQu).
 - Buttons: **immer Icons, keine Beschriftung** (z. B. Reload = `tubequ-reload-symbolic`, nicht „Reload“);
   Erklärung nur als Tooltip. Kein Rahmen/Hintergrund, nur Hover-/Klick-Effekt. Eigene minimalistische
   Icons (`tubequ-*-symbolic`, 16×16, `fill="#000"`, GTK färbt sie in der Schriftfarbe), keine Emojis.
-- Laden von Inhalten = graue Platzhalter in der Form des Inhalts mit Glanzstreifen (style.css `.skeleton`): Raster/Nachladen `grid.rs` `ghost_card` (Breiten über `part`, keine festen Pixel), Ansehen-Seite `watch.rs` `skeleton`, Kanalkopf `channel.rs` `ghost`. Sonst (Bubble, Player) Spinner, kein Text. Spinner = `icons::spinner()` (gedrehtes Icon), **nie `gtk::Spinner`**:
+- Laden von Inhalten = graue Platzhalter in der Form des Inhalts mit Glanzstreifen (qu-core-CSS `.skeleton`): Raster/Nachladen `grid.rs` `ghost_card` (Breiten über `part`, keine festen Pixel), Ansehen-Seite `watch.rs` `skeleton`, Kanalkopf `channel.rs` `ghost`. Sonst (Bubble, Player) Spinner, kein Text. Spinner = `icons::spinner()` (gedrehtes Icon), **nie `gtk::Spinner`**:
   der friert in GTK 4.24 nach einmal Ausblenden (auch Seitenwechsel) für immer ein.
 - Keine knalligen Farben (Sponsor-Bereiche dezent in Schriftfarbe, Abo-Symbol ohne YouTube-Rot).
 - Popover (z. B. Player-Einstellungen) in Theme-Farben, Auswahlpunkte in Akzentfarbe (`theme.rs`).
 - Runde Bilder: Klasse `.avatar` + `overflow(Hidden)` + `halign/valign(Center)` – sonst ist das
   Image-Widget größer als das Bild und die Rundung schneidet nur dessen Ecken.
-- CSS-Priorität: `style.css` = `APPLICATION + 1`, `theme.rs` = `APPLICATION`. GTK entscheidet
+- CSS-Priorität: App-CSS (`qu_core::CSS`, Tubequ hat kein eigenes mehr) = `APPLICATION + 1`, `theme.rs` = `APPLICATION`. GTK entscheidet
   bei gleicher Priorität nach Ladereihenfolge, nicht nach Spezifität. GTK-Default-Theme gibt
   `scale highlight` einen blauen Rahmen + `margin: -1px` → bei eigenen Reglern `border: none;
   margin: 0;` und eine `min-height` setzen.
@@ -224,7 +219,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 
 ## Bedienung (Komfort)
 
-- Timeline-Sprung: Die Timeline hält das Ziel (`seek_target`, `seek_state` in `controls.rs`), bis das Video 1 s darüber hinaus ist. mpv meldet nach dem Sprung erst das Ziel, dann das Schlüsselbild davor (`hr-seek=no`), vorher noch die alte Position – sonst springt der Zeiger Ziel → alt → Ziel bzw. kurz zurück.
+- Timeline-Sprung: Die Timeline hält das Ziel (`seek_target`, `seek_state` in qu-core `controls.rs`), bis das Video 1 s darüber hinaus ist. mpv meldet nach dem Sprung erst das Ziel, dann das Schlüsselbild davor (`hr-seek=no`), vorher noch die alte Position – sonst springt der Zeiger Ziel → alt → Ziel bzw. kurz zurück.
 
 - Player: Doppelklick links/rechts = −/+10 s, Mitte = Vollbild; `+`/`-` = Lautstärke (Mausrad bewusst nicht); Einblendung
   mitten im Bild bei Sprung/Lautstärke/Ton/Tempo/Untertitel (nicht in den ersten 1,5 s nach `play`).
@@ -242,11 +237,11 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 - Lade-Kreis in der Bubble: `crate::Busy::new()` in jeden Ladevorgang mitnehmen (Raster, Nachladen, Video-Details, Konten, Abo); Reload lässt das Alte stehen, bis das Neue da ist.
 - Ansehen-Seite: Infos unter dem Video erst sichtbar, wenn die Details da sind; bis dahin graue Platzhalter in derselben Form (Titel, Profilbild-Kreis, Kanal, Beschreibung) mit durchlaufendem Glanzstreifen (`watch.rs` `skeleton`, style.css `.skeleton`), nicht bei direkt abgespielten Adressen. Kanal-Profilbilder haben bis zum Laden einen grauen Kreis (`.avatar.placeholder`). Suchfeld zeigt beim Öffnen die letzte Suche (markiert); leer oder unverändert = Liste der letzten Suchen, keine Vorschlags-Anfrage.
 - Weiches Scrollen mit dem Mausrad (`smooth.rs`, an jedem ScrolledWindow): Raststufen gleiten statt zu springen; Touchpad bleibt bei GTK.
-- Feinschliff (style.css, Ende): Vorschaubilder mit grauem Platzhalter (`.thumb-box`), Einblenden beim Laden (`.fade` → `.loaded`), Hover-Zoom 4 %; Ansehen-Seite blendet ein (`page-in-a/-b` im Wechsel, sonst startet die Animation nicht neu), Karte → Player und Player ↔ Miniplayer fliegen (`fly.rs`).
+- Feinschliff (qu-core-CSS, Ende): Vorschaubilder mit grauem Platzhalter (`.thumb-box`), Einblenden beim Laden (`.fade` → `.loaded`), Hover-Zoom 4 %; Ansehen-Seite blendet ein (`page-in-a/-b` im Wechsel, sonst startet die Animation nicht neu), Karte → Player und Player ↔ Miniplayer fliegen (`fly.rs`).
 - Ton: Stummschalten blendet über den Filter `@fade` (lavfi `volume`, per `af-command`) in 160 ms aus/ein, `+`/`-` ändern die Lautstärke in kleinen Schritten (`Controls::toggle_mute`/`step_volume`). `af-command` meldet trotzdem einen Fehler (Ziel „all“ trifft auch Filter ohne den Befehl), wirkt aber.
 - Tastatur im Raster: Pfeiltasten wählen die erste Karte, danach navigiert GTK; die Liste gleitet zur gewählten Karte (`smooth.rs`, nur bei Tastatur-Fokus). Timeline braucht nichts: mpv meldet `time-pos` jedes Bild.
 - Nachladen eine Bildschirmhöhe vor dem Ende (`grid.rs`, `connect_value_changed`), nicht früher (jede Seite = Anfrage).
-- Miniplayer: Verlässt man die Ansehen-Seite, während ein Video läuft, spielt es unten rechts klein weiter (400 px; Knöpfe als Bubbles in den Ecken: oben links groß machen, oben rechts schließen, unten links Play + Ton). Tasten im Miniplayer: Leertaste/`k` Pause, `m` Ton, `f` zurück zum großen Video (kein Vollbild), `q` schließen; Pfeile/Ziffern bleiben fürs Raster. Die Ansehen-Seite liegt dafür als Ebene über dem Stack (im Stack nur ein Platzhalter „watch“) und wird nur verkleinert (`WatchPage::set_mini`, `Nav::set_mini`): der Player wird **nicht umgehängt**, sonst baut GTK die GLArea neu und mpv schaltet das Video ab. Am Ende/bei Fehler stoppt das Video (`Player::active`). Der Miniplayer lässt sich ziehen (`GestureDrag` an der Ansehen-Seite, Capture, ab 8 px; gezeichnet über `Zoom::set_offset`) und gleitet beim Loslassen (`snap` in `main.rs`) mit der Zoom-Animation in die nächste Ecke (`WatchPage::set_corner`, gilt für die Sitzung). Klick ins Miniplayer-Video pausiert deshalb nicht (`player.rs` `in_mini`), Pause über den Knopf.
+- Miniplayer: Verlässt man die Ansehen-Seite, während ein Video läuft, spielt es unten rechts klein weiter (400 px; Knöpfe als Bubbles in den Ecken: oben links groß machen, oben rechts schließen, unten links Play + Ton). Tasten im Miniplayer: Leertaste/`k` Pause, `m` Ton, `f` zurück zum großen Video (kein Vollbild), `q` schließen; Pfeile/Ziffern bleiben fürs Raster. Die Ansehen-Seite liegt dafür als Ebene über dem Stack (im Stack nur ein Platzhalter „watch“) und wird nur verkleinert (`WatchFrame::set_mini`, `Nav::set_mini` in qu-core): der Player wird **nicht umgehängt**, sonst baut GTK die GLArea neu und mpv schaltet das Video ab. Am Ende/bei Fehler stoppt das Video (`Player::active`). Die Mini-Knöpfe erscheinen erst nach der Schrumpf-Animation (`Zoom::after`), sonst würden sie mit hochskaliert gezeichnet. Der Miniplayer lässt sich ziehen (`GestureDrag` an der Ansehen-Seite, Capture, ab 8 px; gezeichnet über `Zoom::set_offset`) und gleitet beim Loslassen (Ziehen in qu-core `nav.rs`) mit der Zoom-Animation in die nächste Ecke (`WatchFrame::set_corner`, gilt für die Sitzung). Klick ins Miniplayer-Video pausiert deshalb nicht (qu-core qu-core `player.rs` `in_mini`), Pause über den Knopf.
 - MPRIS über `/usr/lib/mpv-mpris/mpris.so` (Paket mpv-mpris, falls vorhanden); Bildschirmschoner-
   Sperre während der Wiedergabe über `gtk::Application::inhibit`. Fenstertitel = Videotitel.
 

@@ -87,7 +87,7 @@ impl From<Paginator<VideoItem>> for Page {
 }
 
 fn cache_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/tubequ")
+    qu_core::app::cache_dir()
 }
 
 static RP: LazyLock<RustyPipe> = LazyLock::new(|| {
@@ -342,28 +342,7 @@ fn ytdlp_json(json: &str) -> Option<serde_json::Value> {
 }
 
 /// Vorschaubilder für die Timeline: YouTube-„Storyboard“, Bögen mit `cols`×`rows` kleinen Bildern.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Storyboard {
-    pub width: i32,
-    pub height: i32,
-    pub cols: u32,
-    pub rows: u32,
-    /// Bilder pro Sekunde Video (z. B. 0,5 = alle 2 s ein Bild).
-    pub fps: f64,
-    /// Ein Bild-URL pro Bogen.
-    pub sheets: Vec<String>,
-}
-
-impl Storyboard {
-    /// Bogen und Ausschnitt (x, y) des Bilds zur Zeit `t`.
-    pub fn locate(&self, t: f64) -> (usize, i32, i32) {
-        let per_sheet = (self.cols * self.rows).max(1) as usize;
-        let last = (self.sheets.len() * per_sheet).saturating_sub(1);
-        let i = ((t.max(0.0) * self.fps) as usize).min(last);
-        let within = (i % per_sheet) as u32;
-        (i / per_sheet, (within % self.cols) as i32 * self.width, (within / self.cols) as i32 * self.height)
-    }
-}
+pub use qu_core::controls::Storyboard;
 
 /// Storyboard mit den größten Bildern aus dem yt-dlp-JSON (holt mpv beim Laden ohnehin; die Bögen
 /// kommen vom Bilder-CDN i.ytimg.com wie die Thumbnails, nicht über das Anfragen-Limit).
@@ -385,13 +364,6 @@ pub fn storyboard_from_ytdlp(json: &str) -> Option<Storyboard> {
         sheets,
     })
     .filter(|s| !s.sheets.is_empty() && s.cols > 0 && s.rows > 0)
-}
-
-/// Bild laden ohne Festplatten-Cache (Storyboard-Bögen; viele, nur für das laufende Video gebraucht).
-pub async fn fetch_image(url: String) -> Result<Vec<u8>, String> {
-    let _slot = THUMB_SLOTS.acquire().await.map_err(|e| e.to_string())?;
-    let res = HTTP.get(url).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
-    Ok(res.bytes().await.map_err(|e| e.to_string())?.to_vec())
 }
 
 /// Klartext-Beschreibung als Pango-Markup; Web-Adressen werden zu Links.

@@ -1,20 +1,14 @@
 #!/bin/sh
 # Baut Tubequ und installiert es für den aktuellen Nutzer (ohne root) samt Startmenü-Eintrag.
-# Entfernen: die unten genannten Dateien löschen; für die Link-Weiche in
+# Entfernen: die Dateien löschen, die `--install` ausgibt, und die Link-Weiche; für sie in
 # ~/.config/hyprland-mimeapps.list die https-Zeile wieder auf omarchy-browser.desktop setzen.
 set -e
 cd "$(dirname "$0")"
 
 cargo build --release
-
+# Programm, Icon und Startmenü-Eintrag (Texte aus qu.toml) legt die App selbst an.
+./target/release/tubequ --install
 bin="$HOME/.local/bin/tubequ"
-icon="$HOME/.local/share/icons/hicolor/scalable/apps/dev.tubequ.Tubequ.svg"
-desktop="$HOME/.local/share/applications/dev.tubequ.Tubequ.desktop"
-
-install -Dm755 target/release/tubequ "$bin"
-install -Dm644 data/dev.tubequ.Tubequ.svg "$icon"
-mkdir -p "$(dirname "$desktop")"
-sed "s|@BIN@|$bin|" data/dev.tubequ.Tubequ.desktop > "$desktop"
 
 # Links aus anderen Apps (Discord …): nur unter Omarchy, das Links über omarchy-browser.desktop leitet.
 # Die Weiche bekommt nur https (Omarchy erkennt den Browser am http-Eintrag, der bleibt).
@@ -31,9 +25,3 @@ if grep -q 'dev.tubequ.Links.desktop' "$list" 2>/dev/null; then
   chmod 755 "$links"
   sed "s|@LINKS@|$links|" data/dev.tubequ.Links.desktop > "$links_desktop"
 fi
-
-# Startmenü neu einlesen (falls das Werkzeug da ist).
-command -v update-desktop-database >/dev/null && update-desktop-database -q "$(dirname "$desktop")" || true
-
-echo "Installiert: $bin"
-echo "Startmenü:   $desktop"

@@ -56,6 +56,7 @@ Double-click left/right on the player seeks −/+10 s, the middle toggles fullsc
 - [RustyPipe](https://codeberg.org/ThetaDev/rustypipe) for YouTube data
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [mpv](https://mpv.io) for playback
 - [SponsorBlock](https://sponsor.ajay.app) for segment data
+- [FSRCNNX](https://github.com/igv/FSRCNN-TensorFlow) upscaling shader by igv (GPL-3.0/LGPL-3.0, via qu-core)
 - The default theme uses the colors of the "Last Horizon" theme from [Omarchy](https://github.com/basecamp/omarchy) (MIT)
 
 ## Disclaimer

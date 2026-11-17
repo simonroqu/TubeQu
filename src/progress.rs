@@ -8,13 +8,6 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Kürzer geschaut zählt als „nur reingeklickt“ und wird nicht gespeichert.
-const MIN_WATCHED: f64 = 30.0;
-/// Ab diesem Anteil gilt ein Video als fertig und startet beim nächsten Mal von vorne.
-const FINISHED_AT: f64 = 0.95;
-/// Beim Fortsetzen ein paar Sekunden zurückspringen, um wieder reinzukommen.
-const REWIND: f64 = 3.0;
-
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Entry {
     pub pos: f64,
@@ -29,21 +22,18 @@ pub struct Entry {
 
 impl Entry {
     pub fn finished(&self) -> bool {
-        self.dur > 0.0 && self.pos >= self.dur * FINISHED_AT
+        qu_core::progress::finished(self.pos, self.dur)
     }
 
     /// Anteil für den Balken auf dem Thumbnail (0.0 – 1.0).
     pub fn fraction(&self) -> f64 {
-        if self.finished() { 1.0 } else { (self.pos / self.dur).clamp(0.0, 1.0) }
+        qu_core::progress::fraction(self.pos, self.dur)
     }
 }
 
 /// Datei in `~/.local/share/tubequ/`.
 pub fn data_file(name: &str) -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
-    base.join("tubequ").join(name)
+    qu_core::app::data_file(name)
 }
 
 fn path() -> PathBuf {
@@ -136,7 +126,7 @@ pub fn continue_watching(n: usize) -> Vec<Video> {
 /// Stelle zum Fortsetzen, falls das Video angefangen und nicht fertig ist.
 pub fn resume_at(id: &str) -> Option<f64> {
     let e = get(id)?;
-    (!e.finished()).then(|| (e.pos - REWIND).max(0.0))
+    qu_core::progress::resume_from(e.pos, e.dur)
 }
 
 /// Titel/Kanal aus den Video-Details, für Videos, die ohne diese Infos gestartet wurden (per Link).
@@ -149,7 +139,7 @@ pub fn remember_meta(v: Video) {
 /// Position speichern (unter 30 s geschaut: nichts tun).
 /// Fehlen Titel/Kanal (z. B. per Link gestartet), bleiben die bisher gespeicherten erhalten.
 pub fn record(v: &Video, pos: f64, dur: f64) {
-    if dur <= 0.0 || pos < MIN_WATCHED {
+    if !qu_core::progress::worth_saving(pos, dur) {
         return;
     }
     let updated = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -183,8 +173,13 @@ pub fn record(v: &Video, pos: f64, dur: f64) {
 mod tests {
     use super::*;
 
+    fn cfg() {
+        qu_core::config::load(include_str!("../qu.toml"));
+    }
+
     #[test]
     fn rules_and_roundtrip() {
+        cfg();
         let half = Entry { pos: 300.0, dur: 600.0, updated: 1, title: "T\tmit Tab".into(), published_at: Some(1_700_000_000), ..Default::default() };
         let done = Entry { pos: 590.0, dur: 600.0, updated: 2, ..Default::default() };
         assert!(!half.finished() && done.finished());

@@ -1,0 +1,58 @@
+# Tubequ – App-Konfiguration für qu-core (beim Bauen eingebettet). Beschreibung der Felder: ~/Work/quCore/CLAUDE.md
+
+[app]
+name = "tubequ"
+title = "Tubequ"
+id = "dev.tubequ.Tubequ"
+# Startmenü-Eintrag (`tubequ --install`)
+generic_name = "YouTube client"
+comment = "Ad-free YouTube: home feed, search, channels and live streams"
+keywords = ["youtube", "video", "stream", "live"]
+
+# Menü oben links. Eingebaut: back, home, search, busy, menu (Burger).
+[nav]
+top = ["menu", "back", "home", "search", "busy"]
+menu = ["later", "history", "account"]
+
+[[nav.item]]
+id = "later"
+icon = "later"
+tooltip = "Watch later"
+
+[[nav.item]]
+id = "history"
+icon = "history"
+tooltip = "History"
+
+# Kontozeile (Profilbild + aufklappende Kontoliste) füllt tubequ selbst; klappt nach rechts auf.
+[[nav.item]]
+id = "account"
+slot = true
+expands = true
+
+[search]
+placeholder = "Search YouTube"
+suggestions = "app"
+
+# Player: wählbare Qualitäten, Standard, Shader-Set fürs AI-Upscaling (fsrcnnx | anime4k).
+[player]
+qualities = [2160, 1440, 1080, 720, 480, 360]
+default_quality = 1080
+upscaler = "fsrcnnx"
+segments = "auto"          # SponsorBlock-Abschnitte automatisch überspringen (sonst "button")
+auto_subtitles = false     # Untertitel erst auf Taste c / Klick (YouTube hat fast immer automatische)
+
+# Fortschritt: speichern ab (s), fertig ab (Anteil), beim Fortsetzen zurück (s).
+[progress]
+min_watched = 30
+finished_at = 0.95
+rewind = 3
+
+# Raster: Thumbnails 16:9, ab 320 px, höchstens 4 Spalten; Strg+Mausrad 3–6 Spalten (Karten ≥ 200 px).
+[grid]
+card_width = 320
+min_card_width = 200
+max_columns = 4
+zoom_columns = [3, 6]
+image = "16:9"
+info_lines = 2

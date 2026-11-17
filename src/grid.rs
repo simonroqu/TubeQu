@@ -1,5 +1,6 @@
 //! Raster aus Video-Karten. Suche, Feed und Kanal nutzen alle dieses eine Raster.
 
+use qu_core::cards::{COLUMN_SPACING, TOP_MARGIN, columns, ghost_card, image_height, label, step_columns};
 use crate::bg;
 use crate::progress;
 use crate::youtube::{self, More, Page, Video};
@@ -9,10 +10,7 @@ use gtk::{gdk, glib};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub fn fmt_duration(s: u32) -> String {
-    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
-}
+pub use qu_core::controls::fmt_duration;
 
 /// Kurz wie bei YouTube (Englisch): 999 → "999", 4500 → "4.5K", 45300 → "45K", 1234567 → "1.2M".
 pub fn fmt_views(n: u64) -> String {
@@ -41,20 +39,6 @@ pub fn fmt_ago(secs: i64) -> String {
             format!("{n} {name}{} ago", if n == 1 { "" } else { "s" })
         })
         .unwrap_or_else(|| "just now".into())
-}
-
-fn label(text: &str, classes: &[&str]) -> gtk::Label {
-    gtk::Label::builder()
-        .label(text)
-        .xalign(0.0)
-        .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
-        .lines(2)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .max_width_chars(1) // Breite kommt von der Karte, nicht vom Text
-        .hexpand(true)
-        .css_classes(classes.to_vec())
-        .build()
 }
 
 /// Kanalname als flacher Button; Klick öffnet die Kanalseite.
@@ -126,20 +110,15 @@ fn card_menu(card: &gtk::Box, v: &Video) {
     card.add_controller(click);
 }
 
-/// Vorschaubild-Höhe im 16:9-Format zur Kartenbreite.
-fn thumb_height(width: i32) -> i32 {
-    width * 9 / 16
-}
-
 fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk::ProgressBar, gtk::Picture) {
     let pic = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
         .can_shrink(true)
-        .height_request(thumb_height(width))
+        .height_request(image_height(width))
         .css_classes(["thumb"])
         .build();
     load_thumb(&pic, v.id.clone());
-    crate::fly::register(&v.id, &pic);
+    qu_core::fly::register(&v.id, &pic);
 
     // Grauer Platzhalter in Bildgröße, bis das Bild da ist; schneidet auch den Hover-Zoom ab.
     let thumb = gtk::Overlay::builder().child(&pic).overflow(gtk::Overflow::Hidden).css_classes(["thumb-box"]).build();
@@ -179,30 +158,6 @@ fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk
         b.append(&label(&meta.join(" · "), &["dim-label", "caption"]));
     }
     (b, bar, pic)
-}
-
-/// Lade-Platzhalter in Form einer Karte: Vorschaubild, Titel, Kanal, Aufrufe (style.css `.skeleton`).
-/// Gibt auch den Bild-Platzhalter zurück: seine Höhe folgt wie bei echten Karten der Spaltenbreite (`fit`).
-fn ghost_card(width: i32) -> (gtk::Box, gtk::Box) {
-    let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
-    let thumb = gtk::Box::builder().height_request(thumb_height(width)).css_classes(["skeleton"]).build();
-    b.append(&thumb);
-    b.append(&part(4, 5, 16));
-    b.append(&part(1, 2, 12));
-    b.append(&part(1, 3, 12));
-    (b, thumb)
-}
-
-/// Grauer Balken über `k` von `n` gleich breiten Teilen der Zeile – ohne feste Pixelbreite,
-/// die dem Fenster eine Mindestbreite aufzwänge.
-fn part(k: i32, n: i32, height: i32) -> gtk::Grid {
-    let g = gtk::Grid::builder().column_homogeneous(true).build();
-    g.attach(&gtk::Box::builder().height_request(height).css_classes(["skeleton"]).build(), 0, 0, k, 1);
-    // Jede freie Spalte braucht ein Kind, sonst zählt sie bei gleich breiten Spalten nicht mit.
-    for i in k..n {
-        g.attach(&gtk::Box::new(gtk::Orientation::Horizontal, 0), i, 0, 1, 1);
-    }
-    g
 }
 
 pub fn load_thumb(pic: &gtk::Picture, id: String) {
@@ -254,44 +209,16 @@ fn bars(h: i32, dark: impl Fn(i32) -> bool) -> (i32, i32) {
     (count(&mut (0..max)), count(&mut (0..max).map(|y| h - 1 - y)))
 }
 
-/// Kleinste Kartenbreite plus Abstand, um aus der verfügbaren Breite die Spaltenzahl zu berechnen.
-/// Die Karten wachsen dann mit, bis die Reihe gefüllt ist.
-const CARD_WIDTH: i32 = 320;
-/// Höchstens so viele Karten pro Reihe (auch im Vollbild), damit sie groß bleiben.
-const MAX_COLUMNS: i32 = 4;
-const COLUMN_SPACING: i32 = 16;
 /// Nach so vielen Reihen Vorschlägen kommt auf der Startseite „Weiterschauen“.
 const ROWS_BEFORE_SHELF: usize = 4;
 /// Höchstens so viele Videos in „Weiterschauen“.
 const SHELF_MAX: usize = 3;
 
-/// Mit Strg+Mausrad wählbare Spaltenzahl.
-const MIN_WANT: usize = 3;
-const MAX_WANT: usize = 6;
-/// Gewählte Spalten werden nur so weit gezeigt, wie Karten dieser Breite noch passen.
-const MIN_CARD_WIDTH: i32 = 200;
-
-/// Spalten für eine Breite: ohne Wahl so viele 320-px-Karten wie passen, höchstens `MAX_COLUMNS`;
-/// mit Strg+Mausrad gewählt (`want`) diese Zahl, solange Karten ≥ `MIN_CARD_WIDTH` passen.
-fn columns(width: i32, want: Option<usize>) -> usize {
-    let fit = |card: i32| ((width + COLUMN_SPACING) / (card + COLUMN_SPACING + 8)).max(1) as usize;
-    match want {
-        Some(n) => n.min(fit(MIN_CARD_WIDTH)),
-        None => fit(CARD_WIDTH).min(MAX_COLUMNS as usize),
-    }
-}
-
 thread_local! {
     /// Gewählte Spaltenzahl, gilt für alle Raster (Startseite, Kanal); gespeichert in `~/.config/tubequ/columns`.
     static WANT: Cell<Option<usize>> = Cell::new(
-        std::fs::read_to_string(crate::controls::config_file("columns")).ok().and_then(|s| s.trim().parse().ok()),
+        std::fs::read_to_string(qu_core::app::config_file("columns")).ok().and_then(|s| s.trim().parse().ok()),
     );
-}
-
-/// Eine Spalte mehr (`dy` < 0, Mausrad hoch) oder weniger, in `MIN_WANT..=MAX_WANT`.
-fn step_columns(current: usize, dy: f64) -> usize {
-    let n = if dy < 0.0 { current + 1 } else { current.saturating_sub(1) };
-    n.clamp(MIN_WANT, MAX_WANT)
 }
 
 fn flowbox() -> gtk::FlowBox {
@@ -345,9 +272,6 @@ pub struct Grid {
     /// Startet die zuletzt gezeigte Anfrage erneut (für Reload).
     last: RefCell<Option<Rc<dyn Fn(&Rc<Grid>, Option<Page>)>>>,
 }
-
-/// Abstand oben bis zum ersten Video (unter der schwebenden Navigation).
-const TOP_MARGIN: i32 = 56;
 
 impl Grid {
     /// Fester Abstand über dem Raster (statt Platz für die Navigation), für Seiten mit eigenem Kopf.
@@ -422,7 +346,7 @@ impl Grid {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
             .build();
-        crate::smooth::attach(&scroll);
+        qu_core::smooth::attach(&scroll);
         let widget = gtk::Overlay::builder().child(&scroll).build();
         // Kurze Hinweise unten („Saved to Watch later“ …).
         let note = gtk::Label::builder()
@@ -461,7 +385,7 @@ impl Grid {
             home: Cell::new(false),
             columns: Cell::new(3),
             width: Cell::new(0),
-            column_width: Cell::new(CARD_WIDTH),
+            column_width: Cell::new(qu_core::config().grid.card_width),
             generation: Cell::new(0),
             last: RefCell::default(),
         });
@@ -503,7 +427,7 @@ impl Grid {
                 if c.unit() == gdk::ScrollUnit::Wheel && dy != 0.0 {
                     let n = step_columns(grid.columns.get(), dy);
                     WANT.set(Some(n));
-                    let f = crate::controls::config_file("columns");
+                    let f = qu_core::app::config_file("columns");
                     let _ = std::fs::create_dir_all(f.parent().unwrap());
                     let _ = std::fs::write(f, n.to_string());
                     grid.fit();
@@ -622,10 +546,10 @@ impl Grid {
         if (col_width - self.column_width.get()).abs() > 4 {
             self.column_width.set(col_width);
             for pic in self.pics.borrow().iter().chain(self.shelf_pics.borrow().iter()) {
-                pic.set_height_request(thumb_height(col_width));
+                pic.set_height_request(image_height(col_width));
             }
             for t in self.ghost_thumbs.borrow().iter() {
-                t.set_height_request(thumb_height(col_width));
+                t.set_height_request(image_height(col_width));
             }
         }
         if cols != self.columns.get() {
@@ -758,7 +682,7 @@ impl Grid {
         // ponytail: ~90 px Text unter dem Bild + Reihenabstand geschätzt.
         // Beim App-Start hat das Fenster noch keine Höhe: dann 4 Reihen.
         let h = self.scroll.height();
-        let rows = rows.unwrap_or(if h > 0 { (h / (thumb_height(width) + 90).max(1)) as usize + 1 } else { 4 }).max(2);
+        let rows = rows.unwrap_or(if h > 0 { (h / (image_height(width) + 90).max(1)) as usize + 1 } else { 4 }).max(2);
         flow.set_min_children_per_line(cols as u32);
         flow.set_max_children_per_line(cols as u32);
         flow.remove_all();
@@ -835,8 +759,13 @@ impl Grid {
 mod tests {
     use super::*;
 
+    fn cfg() {
+        qu_core::config::load(include_str!("../qu.toml"));
+    }
+
     #[test]
     fn bars_found() {
+        cfg();
         // 360 hoch, oben 45 und unten 60 dunkle Zeilen.
         assert_eq!(bars(360, |y| y < 45 || y >= 300), (46, 61));
         assert_eq!(bars(360, |_| false), (0, 0));
@@ -846,6 +775,7 @@ mod tests {
 
     #[test]
     fn formats() {
+        cfg();
         assert_eq!(fmt_ago(30), "just now");
         assert_eq!(fmt_ago(60), "1 minute ago");
         assert_eq!(fmt_ago(3 * 60 + 59), "3 minutes ago");
@@ -873,6 +803,6 @@ mod tests {
         assert_eq!(step_columns(6, -1.0), 6);
         assert_eq!(step_columns(3, 1.0), 3);
         assert_eq!(step_columns(1, -1.0), 3);
-        assert_eq!(thumb_height(640), 360);
+        assert_eq!(image_height(640), 360);
     }
 }

@@ -28,7 +28,7 @@ thread_local! {
 }
 
 fn show_sub(sub: &gtk::Button, on: bool) {
-    sub.set_icon_name(if on { "tubequ-subscribed-symbolic" } else { "tubequ-subscribe-symbolic" });
+    sub.set_icon_name(if on { "qu-subscribed-symbolic" } else { "qu-subscribe-symbolic" });
     sub.set_tooltip_text(Some(if on { "Unsubscribe" } else { "Subscribe" }));
 }
 
