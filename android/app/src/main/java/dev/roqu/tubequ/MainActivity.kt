@@ -25,6 +25,7 @@ import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
+import org.schabi.newpipe.extractor.services.youtube.dashmanifestcreators.YoutubeProgressiveDashManifestCreator
 import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.stream.StreamType
 import uniffi.tubequ_ffi.*
@@ -215,8 +216,16 @@ fun WatchPage(video: Clip) {
                     .maxWithOrNull(compareBy({ it.height }, { codec(it.codec) }))
                 val a = info.audioStreams.filter { it.isUrl }
                     .maxWithOrNull(compareBy({ it.format == MediaFormat.M4A }, { it.averageBitrate }))
-                if (v != null && a != null) {
-                    Video(url = v.content, audio = a.content, start = resumeAt(video.id),
+                if (v != null && a != null && v.itagItem != null && a.itagItem != null) {
+                    // Nicht die ganze Datei auf einmal anfordern: YouTube bremst das nach wenigen Sekunden aus (am Desktop
+                    // lädt mpv deshalb in 10-MiB-Stücken). Wie die NewPipe-App: DASH-Manifest aus dem Stream, ExoPlayer
+                    // holt dann kleine Abschnitte (Video-CDN, zählt nicht zum Limit).
+                    val dash = { s: org.schabi.newpipe.extractor.stream.Stream ->
+                        val mpd = YoutubeProgressiveDashManifestCreator.fromProgressiveStreamingUrl(s.content, s.itagItem!!, info.duration)
+                        "data:application/dash+xml;base64," + android.util.Base64.encodeToString(mpd.toByteArray(), android.util.Base64.NO_WRAP)
+                    }
+                    Video(url = dash(v), mime = MimeTypes.APPLICATION_MPD, audio = dash(a), audioMime = MimeTypes.APPLICATION_MPD,
+                        start = resumeAt(video.id),
                         speed = speed(current.channelId.orEmpty()).toFloat())
                 } else {
                     val muxed = info.videoStreams.filter { it.isUrl }.maxByOrNull { it.height }

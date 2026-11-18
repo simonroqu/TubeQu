@@ -53,7 +53,9 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
   Suche über rustypipe, „Watch later“/„History“ als Knöpfe in der Bubble, „Continue watching“ nach 4 Reihen (höchstens 3).
 - **Abspielen über NewPipeExtractor** (Kotlin, JitPack `TeamNewPipe:NewPipeExtractor`, `Http`-Downloader mit OkHttp):
   rustypipe kann nicht abspielen (siehe Lücken). Vorher **immer `throttle()`** aus Rust (eine Extraktion = 1 Anfrage, wie
-  yt-dlp am Desktop). Bild + Ton getrennt (H.264 bis 1080p bevorzugt, AAC), Livestreams per HLS. SponsorBlock automatisch.
+  yt-dlp am Desktop). Bild + Ton getrennt (H.264 bis 1080p bevorzugt, AAC), je als **DASH-Manifest**
+  (`YoutubeProgressiveDashManifestCreator`, als `data:`-Adresse): die ganze Datei auf einmal angefordert bricht YouTube nach
+  wenigen Sekunden ab (wie mpvs 10-MiB-Stücke am Desktop). Livestreams per HLS. SponsorBlock automatisch.
   YouTube-Links (youtube.com, youtu.be) öffnen die App und spielen direkt.
 - **rustypipe nur über HTTP/1.1** (`RP` in `youtube.rs`): mit rustls/HTTP/2 bricht YouTube ab („stream error … protocol
   error“, 2026-11-18). Am Desktop war es durch native-tls ohnehin HTTP/1.1.
@@ -62,7 +64,7 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
 - Kanal auf Android über rustypipe (`channel_rp`, ohne Dauer/Aufrufe/Datum), aber noch **keine Kanalseite** in der App.
   Ebenfalls noch nicht: Konto/Abo, Suchvorschläge (nur Verlauf), „Watch later“ setzen, Video-Infos.
 - **Getestet (Waydroid, 2026-11-18, 4 Anfragen, kein Bot-Check):** Start, Bubble, Hinweis ohne Empfehlungen (ohne Anfrage),
-  Suche (Karten mit LIVE/Dauer, Aufrufe, Datum), Abspielen eines normalen Videos über NewPipeExtractor. Noch nicht live
+  Suche (Karten mit LIVE/Dauer, Aufrufe, Datum), Abspielen über NewPipeExtractor mit DASH-Manifest (läuft durch, > 1 min geprüft; 6 Anfragen). Noch nicht live
   geprüft: Livestream (HLS), Startseiten-Empfehlungen nach geschauten Videos, Nachladen.
 `cd android && ./gradlew assembleDebug`.
 
