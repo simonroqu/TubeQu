@@ -61,8 +61,9 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
   libclang; das API-Level dafür setzt qu-cores `build-rust.sh`.
 - Kanal auf Android über rustypipe (`channel_rp`, ohne Dauer/Aufrufe/Datum), aber noch **keine Kanalseite** in der App.
   Ebenfalls noch nicht: Konto/Abo, Suchvorschläge (nur Verlauf), „Watch later“ setzen, Video-Infos.
-- **Getestet (Waydroid):** Start, Bubble, Hinweis ohne Empfehlungen (ohne Anfrage). Suche und Abspielen live noch **ungetestet**
-  (die Suche scheiterte vor dem HTTP/1.1-Fix; danach kein Live-Test mehr).
+- **Getestet (Waydroid, 2026-11-18, 4 Anfragen, kein Bot-Check):** Start, Bubble, Hinweis ohne Empfehlungen (ohne Anfrage),
+  Suche (Karten mit LIVE/Dauer, Aufrufe, Datum), Abspielen eines normalen Videos über NewPipeExtractor. Noch nicht live
+  geprüft: Livestream (HLS), Startseiten-Empfehlungen nach geschauten Videos, Nachladen.
 `cd android && ./gradlew assembleDebug`.
 
 ## Aufbau (`src/` = GTK-App, `core/` = Crate `tubequ-core` ohne Oberfläche: `youtube`, `fmt`, `progress`, `lists`, `sponsorblock`)
