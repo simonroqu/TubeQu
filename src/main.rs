@@ -1,30 +1,21 @@
 // Unter Windows ohne zusätzliches Konsolenfenster starten.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use tubequ_core::{lists, progress, sponsorblock, youtube};
+
 mod channel;
 mod grid;
-mod lists;
 mod player;
-mod progress;
-mod sponsorblock;
 mod watch;
-mod youtube;
 
 use qu_core::{fly, icons, search};
 use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::rc::Rc;
-use youtube::Video;
+use youtube::{video_id, Video};
 
 pub use qu_core::{bg, busy::Busy, RT};
-
-/// Video-ID aus einem YouTube-Link (watch?v=…, youtu.be/…, shorts/…).
-fn video_id(url: &str) -> Option<String> {
-    let rest = url.split_once("v=").or_else(|| url.split_once("youtu.be/")).or_else(|| url.split_once("/shorts/"))?.1;
-    let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    (id.len() == 11).then_some(id)
-}
 
 /// Profilbild (über `youtube::avatar`, auf der Platte zwischengespeichert) und Tooltip eines Kontos.
 fn show_account(pic: &gtk::Image, button: &gtk::Button, a: &youtube::Account) {
@@ -595,12 +586,5 @@ mod tests {
     fn qu_toml() {
         let c = qu_core::config::Config::parse(include_str!("../qu.toml")).unwrap();
         assert_eq!(c.app.name, env!("CARGO_PKG_NAME"));
-    }
-
-    #[test]
-    fn video_id() {
-        assert_eq!(super::video_id("https://www.youtube.com/watch?v=sF80I-TQiW0&t=3").as_deref(), Some("sF80I-TQiW0"));
-        assert_eq!(super::video_id("https://youtu.be/sF80I-TQiW0").as_deref(), Some("sF80I-TQiW0"));
-        assert_eq!(super::video_id("https://www.youtube.com/channel/UCxyz"), None);
     }
 }

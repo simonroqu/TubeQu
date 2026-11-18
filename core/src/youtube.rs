@@ -93,7 +93,13 @@ fn cache_dir() -> PathBuf {
 static RP: LazyLock<RustyPipe> = LazyLock::new(|| {
     let dir = cache_dir();
     let _ = std::fs::create_dir_all(&dir);
-    RustyPipe::builder().storage_dir(dir).lang(Language::En).build().expect("rustypipe init")
+    // Nur HTTP/1.1: über HTTP/2 bricht YouTube die Anfragen ab („stream error … protocol error“, gesehen 2026-11-18
+    // mit rustls auf Android). Am Desktop (native-tls ohne ALPN) war es ohnehin schon HTTP/1.1 – dort ändert sich nichts.
+    RustyPipe::builder()
+        .storage_dir(dir)
+        .lang(Language::En)
+        .build_with_client(reqwest::ClientBuilder::new().http1_only())
+        .expect("rustypipe init")
 });
 
 // Zeitpunkte der Anfragen der letzten Stunde. Der Mutex wird während des Wartens gehalten,
@@ -342,7 +348,7 @@ fn ytdlp_json(json: &str) -> Option<serde_json::Value> {
 }
 
 /// Vorschaubilder für die Timeline: YouTube-„Storyboard“, Bögen mit `cols`×`rows` kleinen Bildern.
-pub use qu_core::controls::Storyboard;
+pub use qu_core::storyboard::Storyboard;
 
 /// Storyboard mit den größten Bildern aus dem yt-dlp-JSON (holt mpv beim Laden ohnehin; die Bögen
 /// kommen vom Bilder-CDN i.ytimg.com wie die Thumbnails, nicht über das Anfragen-Limit).
@@ -676,6 +682,26 @@ pub async fn channel(id: String) -> Result<(ChannelInfo, Page), String> {
         return Ok((info, p));
     }
     throttle().await?;
+    #[cfg(not(target_os = "android"))]
+    let (info, mut page) = channel_ytdlp(&id).await?;
+    // Android hat kein yt-dlp: rustypipe (Videos dann ohne Dauer, Aufrufe und Datum, siehe „Bekannte Lücken“).
+    #[cfg(target_os = "android")]
+    let (info, mut page) = channel_rp(&id).await?;
+    // Auf der Kanalseite fehlt der Kanal an den einzelnen Videos.
+    for v in &mut page.videos {
+        if v.channel.is_empty() {
+            v.channel = info.name.clone();
+        }
+        v.channel_id.get_or_insert_with(|| info.id.clone());
+    }
+    CHANNELS.lock().unwrap().insert(id, info.clone());
+    store(key, &page);
+    Ok((info, page))
+}
+
+/// Kanal über `yt-dlp -J --flat-playlist` (Desktop). Die Anfrage zählt der Aufrufer (`throttle`).
+#[cfg(not(target_os = "android"))]
+async fn channel_ytdlp(id: &str) -> Result<(ChannelInfo, Page), String> {
     let url = format!("https://www.youtube.com/channel/{id}/videos");
     let mut cmd = tokio::process::Command::new("yt-dlp");
     if let Some(cookies) = COOKIES.as_deref() {
@@ -693,17 +719,24 @@ pub async fn channel(id: String) -> Result<(ChannelInfo, Page), String> {
         let err = String::from_utf8_lossy(&out.stderr);
         err.lines().rfind(|l| l.contains("ERROR")).unwrap_or("yt-dlp failed").to_string()
     })?;
-    let (info, mut page) = channel_from_json(&json, &id, url);
-    // Auf der Kanalseite fehlt der Kanal an den einzelnen Videos.
-    for v in &mut page.videos {
-        if v.channel.is_empty() {
-            v.channel = info.name.clone();
-        }
-        v.channel_id.get_or_insert_with(|| info.id.clone());
-    }
-    CHANNELS.lock().unwrap().insert(id, info.clone());
-    store(key, &page);
+    let (info, page) = channel_from_json(&json, id, url);
     Ok((info, page))
+}
+
+/// Kanal über rustypipe (Android, ohne yt-dlp). Die Anfrage zählt der Aufrufer (`throttle`).
+#[cfg(target_os = "android")]
+async fn channel_rp(id: &str) -> Result<(ChannelInfo, Page), String> {
+    let c = RP.query().channel_videos(id).await.map_err(|e| e.to_string())?;
+    let avatar = c.avatar.iter().find(|t| t.width >= 88).or(c.avatar.last()).map(|t| https(&t.url));
+    let info = ChannelInfo { id: c.id, name: c.name, avatar, subscribers: c.subscriber_count };
+    Ok((info, Page::from(c.content)))
+}
+
+/// Video-ID aus einem YouTube-Link (watch?v=…, youtu.be/…, shorts/…).
+pub fn video_id(url: &str) -> Option<String> {
+    let rest = url.split_once("v=").or_else(|| url.split_once("youtu.be/")).or_else(|| url.split_once("/shorts/"))?.1;
+    let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    (id.len() == 11).then_some(id)
 }
 
 /// Kanal-Infos und erste Seite aus `yt-dlp -J --flat-playlist`. `url` = Kanal-Tab fürs Nachladen.
@@ -1021,6 +1054,13 @@ async fn image(url: String, file: String) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_id_from_links() {
+        assert_eq!(super::video_id("https://www.youtube.com/watch?v=sF80I-TQiW0&t=3").as_deref(), Some("sF80I-TQiW0"));
+        assert_eq!(super::video_id("https://youtu.be/sF80I-TQiW0").as_deref(), Some("sF80I-TQiW0"));
+        assert_eq!(super::video_id("https://www.youtube.com/channel/UCxyz"), None);
+    }
+
     #[test]
     fn stats_url_sets_position() {
         let u = super::stats_url("https://s.youtube.com/api/stats/watchtime?ns=yt&len=600.1&cmt=0&docid=abc", "xyz", 120.5, true);

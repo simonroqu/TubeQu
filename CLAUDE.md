@@ -11,6 +11,11 @@ Tooltips, „3 days ago“ usw.). Keine deutschen UI-Strings einführen.
 **Diese Datei bei jeder Änderung am Projekt mitpflegen** (gleicher Schritt wie die Code-Änderung), damit eine
 neue Session sofort Bescheid weiß. Nur Entwicklungsrelevantes, keine persönlichen Bemerkungen.
 
+**Zwei Oberflächen, eine Logik:** Desktop (GTK, `src/`) und Android/TV (Compose, `android/`). Jede Änderung am Aussehen
+oder an der Bedienung **immer in beiden** umsetzen (gleicher Schritt), Android danach per Fernbedienung prüfen. Logik
+gehört nach `core/` und gilt dann für beide; neue Funktionen für Android in `ffi/` exportieren. Geht etwas nur auf einer
+Seite (z. B. Miniplayer, Konto), kurz beim Nutzer nachfragen. **Auch auf Android gilt das Anfragen-Limit** (unten).
+
 ## Bauen, starten, installieren
 
 ```bash
@@ -39,21 +44,43 @@ Rückgängig: https-Zeile wieder auf `omarchy-browser.desktop` (Sicherung `.bak-
 Systemvoraussetzungen: `gtk4` (≥ 4.20), `mpv`/libmpv, `yt-dlp` + JS-Laufzeit (Omarchy-yt-dlp ab 2026.10.26:
 `node` über `/etc/yt-dlp.conf` `--js-runtimes node`, Challenge-Löser ejs ist eingebaut; sonst `deno`). Browser-Login (Zen/Firefox/LibreWolf/Chromium/Brave/Chrome) optional.
 
-## Aufbau (`src/`)
+## Android (`android/` + `ffi/`, Stand 2026-11-18)
+
+Wie AniQu (Werkzeuge, Bauen, Waydroid-Test, Fernbedienungs-Regeln: `~/Work/aniqu/CLAUDE.md` Abschnitt Android; Bausteine
+aus qu-core `android/`). `ffi/` = `tubequ-ffi` (UniFFI über `tubequ-core`; Karten mit fertigen Texten aus `core/fmt.rs`,
+Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.../MainActivity.kt` = Seiten.
+- **Anonym** (kein Browser-Login, kein yt-dlp): Startseite = eigene Empfehlungen aus ähnlichen Videos (`own_recommendations`),
+  Suche über rustypipe, „Watch later“/„History“ als Knöpfe in der Bubble, „Continue watching“ nach 4 Reihen (höchstens 3).
+- **Abspielen über NewPipeExtractor** (Kotlin, JitPack `TeamNewPipe:NewPipeExtractor`, `Http`-Downloader mit OkHttp):
+  rustypipe kann nicht abspielen (siehe Lücken). Vorher **immer `throttle()`** aus Rust (eine Extraktion = 1 Anfrage, wie
+  yt-dlp am Desktop). Bild + Ton getrennt (H.264 bis 1080p bevorzugt, AAC), Livestreams per HLS. SponsorBlock automatisch.
+  YouTube-Links (youtube.com, youtu.be) öffnen die App und spielen direkt.
+- **rustypipe nur über HTTP/1.1** (`RP` in `youtube.rs`): mit rustls/HTTP/2 bricht YouTube ab („stream error … protocol
+  error“, 2026-11-18). Am Desktop war es durch native-tls ohnehin HTTP/1.1.
+- rustypipes JS-Engine `rquickjs` hat keine Android-Bindings → Feature `bindgen` nur für Android (`core/Cargo.toml`), braucht
+  libclang; das API-Level dafür setzt qu-cores `build-rust.sh`.
+- Kanal auf Android über rustypipe (`channel_rp`, ohne Dauer/Aufrufe/Datum), aber noch **keine Kanalseite** in der App.
+  Ebenfalls noch nicht: Konto/Abo, Suchvorschläge (nur Verlauf), „Watch later“ setzen, Video-Infos.
+- **Getestet (Waydroid):** Start, Bubble, Hinweis ohne Empfehlungen (ohne Anfrage). Suche und Abspielen live noch **ungetestet**
+  (die Suche scheiterte vor dem HTTP/1.1-Fix; danach kein Live-Test mehr).
+`cd android && ./gradlew assembleDebug`.
+
+## Aufbau (`src/` = GTK-App, `core/` = Crate `tubequ-core` ohne Oberfläche: `youtube`, `fmt`, `progress`, `lists`, `sponsorblock`)
 
 | Datei | Aufgabe |
 |---|---|
 | `main.rs` | Fenster, Navigation (`Nav`: Seiten `browse`/`channel`/`watch`, Verlauf zurück/vor), schwebende Nav-Bubble inkl. Kontowahl, Tastenkürzel, Maus-Seitentasten, Startargumente, Single-Instance (`HANDLES_COMMAND_LINE`), tokio-Runtime + `bg()` |
-| `youtube.rs` | **Einzige Stelle, die mit YouTube spricht.** Rate-Limit, Cache, Suche, Vorschläge, Kanal, Details, Startseite (yt-dlp), Verlauf-Eintrag, Konto/Abonnieren (innertube), Thumbnails/Avatare |
-| `grid.rs` | Video-Raster (2 FlowBoxen + „Continue watching“ nach 4 Reihen), Karten, Nachladen beim Scrollen, `fmt_views`/`fmt_duration`/`fmt_ago` |
+| `core/youtube.rs` | **Einzige Stelle, die mit YouTube spricht.** Rate-Limit, Cache, Suche, Vorschläge, Kanal, Details, Startseite (yt-dlp), Verlauf-Eintrag, Konto/Abonnieren (innertube), Thumbnails/Avatare |
+| `grid.rs` | Video-Raster (2 FlowBoxen + „Continue watching“ nach 4 Reihen), Karten, Nachladen beim Scrollen |
+| `core/fmt.rs` | Texte für Karten/Infos: `fmt_views`, `fmt_ago`, `fmt_duration`, `meta` („45K views · 3 days ago“), `badge` (Dauer/„● LIVE“) – Desktop und Android |
 | `channel.rs` | Kanalseite: Avatar, Name, Abonnentenzahl, Abo-Knopf, eigenes Raster (nur Videos, kein Live-Tab) |
 | `player.rs` | Player-Anbindung an qu-core: `Hooks` (yt-dlp-Optionen, Fortschritt + „Watch later“ aufräumen, Position an YouTube, SponsorBlock, Tempo pro Kanal, zweiter Versuch mit Login), `play`/`reload`, yt-dlp-Qualität (`format_for`) |
 | `watch.rs` | Infos unter dem Video (Titel, Kanal, Beschreibung, Platzhalter bis Details da sind) im `WatchFrame` aus qu-core |
 | `qu.toml` | App-Konfiguration für qu-core: Name/Titel/ID/Startmenü-Texte, **Menü oben links** (`[nav]`), Suche, Player, Fortschrittsregeln, Raster. Format in `~/Work/quCore/CLAUDE.md`; Test `qu_toml` in `main.rs` prüft sie |
 | **qu-core** (`~/Work/quCore`) | Gemeinsamer Unterbau, **dort ändern**: App-Start (`start`, `--install`), Dateien/Tempo (`store`), Fortschrittsregeln (`progress`), Raster-Bausteine (`cards`), Fenster/Seitenverlauf/Miniplayer (`nav`), Player (`player`, `controls`, Rahmen `watch`), Menü (`navbar`), Ladeanzeige (`Busy`), `bg`, CSS-Schichten (`style`), `app` (Pfade), `theme`, gemeinsames CSS (`qu_core::CSS`), `icons` (`qu-*-symbolic`), `nav_shape`, `fly`, `smooth`, `search` (Suchfenster + Suchverlauf), `upscale` (Shader-Set hier: `UPSCALER` in `controls.rs`). Beschreibung in `~/Work/quCore/CLAUDE.md` |
-| `progress.rs` | Fortschritt pro Video in `~/.local/share/tubequ/progress.tsv` (+ Titel/Kanal/Datum für „Continue watching“) |
-| `lists.rs` | Watch later, letzte Suchen, Tempo pro Kanal |
-| `sponsorblock.rs` | SponsorBlock-Abschnitte (sponsor.ajay.app, Hash-Präfix, kein YouTube-Request) |
+| `core/progress.rs` | Fortschritt pro Video in `~/.local/share/tubequ/progress.tsv` (+ Titel/Kanal/Datum für „Continue watching“) |
+| `core/lists.rs` | Watch later, letzte Suchen, Tempo pro Kanal |
+| `core/sponsorblock.rs` | SponsorBlock-Abschnitte (sponsor.ajay.app, Hash-Präfix, kein YouTube-Request) |
 
 Muster: Netzwerk nie im GTK-Thread. `glib::spawn_future_local(async { bg(fut).await })` –
 `bg()` führt auf tokio aus, Ergebnis kommt im GTK-Thread an. Verspätete Antworten werden per
@@ -67,6 +94,7 @@ Muster: Netzwerk nie im GTK-Thread. `glib::spawn_future_local(async { bg(fut).aw
 | Kanalseite (Name, Avatar, Abos, Videos) | `yt-dlp -J --flat-playlist …/channel/<id>/videos` + `youtubetab:approximate_date` (mit Login: Cookies + Konto-Header) | 1 Anfrage, Nachladen über `ytdlp_page`; Datum ungefähr, Aufrufe + Dauer vorhanden; Avatar = `avatar_uncropped` mit `=s176`; Abonnentenzahl = `channel_follower_count` |
 | Suche | mit Login `yt-dlp --cookies-from-browser … ytsearchall:<q>` (personalisiert), sonst/bei Fehler rustypipe | gemeinsamer Code mit Startseite: `ytdlp_page` |
 | Startseite (persönliche Empfehlungen) | `yt-dlp --cookies-from-browser … :ytrec` | Datum nur ungefähr (`youtubetab:approximate_date`), Aufrufe fehlen oft; ohne Login eigene Empfehlungen aus ähnlichen Videos |
+| Abspielen (Android) | NewPipeExtractor (Kotlin), anonym, vorher `throttle()` | siehe Abschnitt Android |
 | Abspielen | mpv → ytdl_hook → yt-dlp, **anonym**, `player_client=visionos` (HLS, kein PO-Token) | Format über `ytdl-format`, Qualität in `~/.config/tubequ/quality`. Standard-Clients von yt-dlp 2026.10.26 (`tv_samsung`, `visionos`, `web`): `tv_samsung`-Streams (`c=TVHTML5`) bekommen seit 2026-11-16 unregelmäßig 403 → „Couldn't load video“ |
 | Als gesehen melden | `youtubei/v1/player` per `innertube` (Cookies, Konto) → `playbackTracking`; Ping an `videostatsPlaybackUrl` (Verlauf), bei Pause/Videowechsel/Stopp Ping an `videostatsWatchtimeUrl` mit echter Position (`cmt`, `st=0`, `et=pos`) | 1 Anfrage über `throttle()`; Pings an s.youtube.com ungedrosselt. **Nicht** `yt-dlp --mark-watched`: meldet immer `len-1` → Video bei YouTube ganz gesehen. Abspielen selbst bleibt ohne Login |
 | Thumbnails/Avatare | `i.ytimg.com` / yt3 per reqwest, Cache `~/.cache/tubequ/thumbs` | zählt nicht zum Limit, max. 6 parallel |

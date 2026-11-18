@@ -10,36 +10,8 @@ use gtk::{gdk, glib};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub use qu_core::controls::fmt_duration;
-
-/// Kurz wie bei YouTube (Englisch): 999 → "999", 4500 → "4.5K", 45300 → "45K", 1234567 → "1.2M".
-pub fn fmt_views(n: u64) -> String {
-    let short = |v: f64, unit: &str| {
-        // Unter 10 eine Nachkommastelle (4.5K), darüber keine (45K).
-        let num = if v < 10.0 { format!("{v:.1}") } else { format!("{v:.0}") };
-        format!("{}{unit}", num.trim_end_matches(".0"))
-    };
-    match n {
-        1_000_000_000.. => short(n as f64 / 1e9, "B"),
-        1_000_000.. => short(n as f64 / 1e6, "M"),
-        1_000.. => short(n as f64 / 1e3, "K"),
-        _ => n.to_string(),
-    }
-}
-
-/// Zeit seit Veröffentlichung wie bei YouTube: "just now", "3 minutes ago", "1 day ago", "2 years ago".
-pub fn fmt_ago(secs: i64) -> String {
-    const UNITS: [(i64, &str); 6] =
-        [(365 * 86400, "year"), (30 * 86400, "month"), (7 * 86400, "week"), (86400, "day"), (3600, "hour"), (60, "minute")];
-    UNITS
-        .iter()
-        .find(|(len, _)| secs >= *len)
-        .map(|(len, name)| {
-            let n = secs / len;
-            format!("{n} {name}{} ago", if n == 1 { "" } else { "s" })
-        })
-        .unwrap_or_else(|| "just now".into())
-}
+// Texte für Karten (auch von der Android-App genutzt): core/fmt.rs.
+pub use tubequ_core::fmt::fmt_views;
 
 /// Kanalname als flacher Button; Klick öffnet die Kanalseite.
 pub fn channel_button(name: &str, id: Option<String>, on_channel: Rc<dyn Fn(String)>) -> gtk::Button {
@@ -122,7 +94,7 @@ fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk
 
     // Grauer Platzhalter in Bildgröße, bis das Bild da ist; schneidet auch den Hover-Zoom ab.
     let thumb = gtk::Overlay::builder().child(&pic).overflow(gtk::Overflow::Hidden).css_classes(["thumb-box"]).build();
-    let badge = if v.is_live { Some("● LIVE".to_string()) } else { v.duration.map(fmt_duration) };
+    let badge = tubequ_core::fmt::badge(v);
     if let Some(b) = badge {
         let l = gtk::Label::builder()
             .label(b)
@@ -138,14 +110,7 @@ fn card(v: &Video, width: i32, on_channel: Rc<dyn Fn(String)>) -> (gtk::Box, gtk
     set_progress(&bar, &v.id);
     thumb.add_overlay(&bar);
 
-    let unit = if v.is_live { "watching" } else { "views" };
-    // Veröffentlichung: aus dem Zeitpunkt berechnet ("3 minutes ago"), sonst YouTubes Text.
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    let published = v.published_at.map(|t| fmt_ago(now - t)).or_else(|| v.published.clone()).filter(|_| !v.is_live);
-    let meta: Vec<String> = [v.views.map(|n| format!("{} {unit}", fmt_views(n))), published]
-        .into_iter()
-        .flatten()
-        .collect();
+    let meta = tubequ_core::fmt::meta(v);
 
     // Keine Mindestbreite: die Spaltenzahl folgt aus `columns`, die Karte füllt ihre Spalte. Eine feste
     // Mindestbreite machte die Seite bei knapper Breite ein paar Pixel breiter als das Fenster.
@@ -776,21 +741,6 @@ mod tests {
     #[test]
     fn formats() {
         cfg();
-        assert_eq!(fmt_ago(30), "just now");
-        assert_eq!(fmt_ago(60), "1 minute ago");
-        assert_eq!(fmt_ago(3 * 60 + 59), "3 minutes ago");
-        assert_eq!(fmt_ago(2 * 3600), "2 hours ago");
-        assert_eq!(fmt_ago(86400), "1 day ago");
-        assert_eq!(fmt_ago(15 * 86400), "2 weeks ago");
-        assert_eq!(fmt_ago(400 * 86400), "1 year ago");
-        assert_eq!(fmt_duration(59), "0:59");
-        assert_eq!(fmt_duration(3725), "1:02:05");
-        assert_eq!(fmt_views(999), "999");
-        assert_eq!(fmt_views(4_500), "4.5K");
-        assert_eq!(fmt_views(45_300), "45K");
-        assert_eq!(fmt_views(1_234_567), "1.2M");
-        assert_eq!(fmt_views(3_000_000), "3M");
-        assert_eq!(fmt_views(2_500_000_000), "2.5B");
         // Spalten: schmal 1, mittel 2–3, breit/Vollbild höchstens 4.
         assert_eq!(columns(300, None), 1);
         assert_eq!(columns(1000, None), 2);

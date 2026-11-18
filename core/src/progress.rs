@@ -174,7 +174,7 @@ mod tests {
     use super::*;
 
     fn cfg() {
-        qu_core::config::load(include_str!("../qu.toml"));
+        qu_core::config::load(include_str!("../../qu.toml"));
     }
 
     #[test]
