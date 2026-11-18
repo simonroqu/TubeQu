@@ -601,12 +601,41 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     })
 }
 
+/// Hängt Ordner an PATH an, in denen die Installation Werkzeuge ablegt (yt-dlp sucht dort `rustypipe-botguard`
+/// für den PO-Token, mpv sucht yt-dlp). Aus Startmenü/Finder gestartet fehlen sie sonst oft: macOS gibt Apps nur
+/// /usr/bin:/bin, Homebrew und ~/.local/bin fehlen. Windows: neben tubequ.exe liegt rustypipe-botguard.exe.
+fn with_tool_dirs(path: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
+    let mut dirs: Vec<std::path::PathBuf> = path.as_deref().map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Into::into));
+    let extra = [exe_dir, Some(home.join(".local/bin")), Some(home.join(".cargo/bin")), Some("/opt/homebrew/bin".into()), Some("/usr/local/bin".into())];
+    for d in extra.into_iter().flatten() {
+        if d.is_dir() && !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_default()
+}
+
 fn main() -> glib::ExitCode {
+    let path = with_tool_dirs(std::env::var_os("PATH"));
+    // SAFETY: ganz am Anfang, es laufen noch keine weiteren Threads.
+    unsafe { std::env::set_var("PATH", path) };
     qu_core::start(include_str!("../qu.toml"), include_str!("../data/dev.tubequ.Tubequ.svg"), build)
 }
 
 #[cfg(test)]
 mod tests {
+    /// Vorhandene Einträge bleiben vorne (Vorrang), fehlende Werkzeug-Ordner kommen ans Ende, nichts doppelt.
+    #[test]
+    fn tool_dirs_appended() {
+        let local = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin");
+        let p = super::with_tool_dirs(Some(std::env::join_paths(["/usr/bin", local.to_str().unwrap()]).unwrap()));
+        let dirs: Vec<_> = std::env::split_paths(&p).collect();
+        assert_eq!(dirs[0], std::path::PathBuf::from("/usr/bin"));
+        assert_eq!(dirs.iter().filter(|d| **d == local).count(), 1);
+    }
+
     /// qu.toml ist gültig (Tippfehler, unbekannte Menüeinträge fallen hier auf statt beim Start).
     #[test]
     fn qu_toml() {

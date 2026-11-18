@@ -1,0 +1,3 @@
+# Shell-Skripte laufen auch unter Windows (WSL, MSYS2): immer mit \n, sonst bricht sh an \r ab.
+*.sh text eol=lf
+android/gradlew text eol=lf

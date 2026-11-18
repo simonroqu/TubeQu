@@ -21,6 +21,8 @@ out="target/$title"
 rm -rf "$out"
 mkdir -p "$out/bin" "$out/lib" "$out/share/glib-2.0/schemas" "$out/share/icons"
 cp "target/release/$name.exe" "$out/bin/"
+# App-eigene Zusatzprogramme nach "$out/bin" (ihre DLLs sammelt die Schleife unten mit ein).
+if [ -f extra-bundle.sh ]; then . ./extra-bundle.sh; fi
 cp -r /ucrt64/lib/gdk-pixbuf-2.0 "$out/lib/"
 rm -f "$out"/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.a
 cp /ucrt64/share/glib-2.0/schemas/gschemas.compiled "$out/share/glib-2.0/schemas/"
@@ -28,7 +30,7 @@ cp -r /ucrt64/share/icons/Adwaita /ucrt64/share/icons/hicolor "$out/share/icons/
 # Bildformat-Lader: Pfade relativ machen (gdk-pixbuf setzt sie unter Windows vor den Programmordner).
 gdk-pixbuf-query-loaders | sed -E 's#^"[^"]*(lib[\\/]+gdk-pixbuf-2\.0)#"\1#' > "$out/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 # Alle DLLs aus MSYS2, die das Programm und die Lader brauchen (Windows-eigene bleiben draußen).
-for f in "$out/bin/$name.exe" "$out"/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.dll; do
+for f in "$out"/bin/*.exe "$out"/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.dll; do
   ldd "$f" | grep -o '/ucrt64/bin/[^ ]*\.dll' || true
 done | sort -u | xargs -I{} cp {} "$out/bin/"
 echo "Fertig: $out"

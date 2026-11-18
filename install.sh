@@ -34,6 +34,10 @@ fi
 # als Git-Quelle kennt (z. B. alter Pfad-Eintrag) – dann löst cargo build es ohnehin frisch auf.
 cargo update -p qu-core 2>/dev/null || true
 cargo build --release
+# PO-Token-Werkzeug für TubeQu (siehe extra-deps.sh); TubeQu sucht es auch in ~/.local/bin, wenn PATH es nicht kennt.
+if ! command -v rustypipe-botguard >/dev/null && [ ! -x "$HOME/.local/bin/rustypipe-botguard" ]; then
+  cargo install --root "$HOME/.local" rustypipe-botguard || echo "Hinweis: rustypipe-botguard nicht gebaut (Abspielen dann ohne Login)."
+fi
 # Programm, Icon und Startmenü-Eintrag (Texte aus qu.toml) legt die App selbst an.
 "./target/release/$name" --install
 

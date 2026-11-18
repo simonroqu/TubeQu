@@ -237,8 +237,22 @@ pub fn logged_in() -> bool {
 }
 
 pub static COOKIES: LazyLock<Option<String>> = LazyLock::new(|| {
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let firefox_like = [".config/zen", ".zen", ".mozilla/firefox", ".config/mozilla/firefox", ".librewolf"];
+    // Windows hat kein HOME, dort USERPROFILE.
+    let home = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default());
+    // Linux, dann macOS (Library/Application Support), dann Windows (AppData).
+    let firefox_like = [
+        ".config/zen",
+        ".zen",
+        ".mozilla/firefox",
+        ".config/mozilla/firefox",
+        ".librewolf",
+        "Library/Application Support/zen/Profiles",
+        "Library/Application Support/Firefox/Profiles",
+        "Library/Application Support/librewolf/Profiles",
+        "AppData/Roaming/zen/Profiles",
+        "AppData/Roaming/Mozilla/Firefox/Profiles",
+        "AppData/Roaming/librewolf/Profiles",
+    ];
     let newest = firefox_like
         .iter()
         .filter_map(|d| std::fs::read_dir(home.join(d)).ok())
@@ -252,7 +266,19 @@ pub static COOKIES: LazyLock<Option<String>> = LazyLock::new(|| {
     if let Some((_, profile)) = newest {
         return Some(format!("firefox:{}", profile.display()));
     }
-    let chromium_like = [(".config/chromium", "chromium"), (".config/BraveSoftware/Brave-Browser", "brave"), (".config/google-chrome", "chrome")];
+    // ponytail: Chrome unter Windows verschlüsselt Cookies seit 2024 an die App gebunden – yt-dlp kann sie dort meist
+    // nicht lesen; dann scheitert der Login-Versuch und TubeQu spielt anonym. Firefox-artige gehen überall.
+    let chromium_like = [
+        (".config/chromium", "chromium"),
+        (".config/BraveSoftware/Brave-Browser", "brave"),
+        (".config/google-chrome", "chrome"),
+        ("Library/Application Support/Chromium", "chromium"),
+        ("Library/Application Support/BraveSoftware/Brave-Browser", "brave"),
+        ("Library/Application Support/Google/Chrome", "chrome"),
+        ("AppData/Local/Chromium/User Data", "chromium"),
+        ("AppData/Local/BraveSoftware/Brave-Browser/User Data", "brave"),
+        ("AppData/Local/Google/Chrome/User Data", "chrome"),
+    ];
     chromium_like.iter().find(|(d, _)| home.join(d).exists()).map(|(_, name)| name.to_string())
 });
 
@@ -875,7 +901,7 @@ static ACCOUNT: LazyLock<AtomicU32> = LazyLock::new(|| {
 });
 
 fn account_file() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/tubequ/account")
+    qu_core::app::config_file("account")
 }
 
 pub fn account() -> u32 {
@@ -897,13 +923,20 @@ fn account_header() -> String {
     format!("X-Goog-AuthUser:{}", account())
 }
 
-/// Zusätzliche `ytdl-raw-options` für mpv, um mit Browser-Login abzuspielen (altersbeschränkte Videos:
-/// „Sign in to confirm your age“). `None` = kein Browser gefunden. Client `tv`: unterstützt Cookies und
-/// braucht keinen PO-Token (`visionos` ignoriert Cookies).
+/// `ytdl-raw-options` für mpv, um mit Browser-Login abzuspielen (Standard, auch altersbeschränkte Videos).
+/// `None` = kein Browser gefunden.
 pub fn login_ytdl_options() -> Option<String> {
     let c = COOKIES.as_deref()?;
-    Some(format!("cookies-from-browser={c},add-header={},extractor-args=youtube:player_client=tv", account_header()))
+    // ponytail: player_client=web_safari (HLS) – yt-dlps Standard mit Login (2026.10.26) ist `web_embedded`, für den
+    // yt-dlp keinen PO-Token anfordert → 403 (getestet 2026-11-18). web_safari bekommt den PO-Token vom Plugin
+    // `yt-dlp-get-pot-rustypipe` + `rustypipe-botguard` (extra-deps.sh).
+    Some(format!("cookies-from-browser={c},add-header={},extractor-args=youtube:player_client=web_safari", account_header()))
 }
+
+/// Anonym abspielen (erster Versuch; mit Login nur im Zweitversuch, siehe `player.rs` `retry_opts`).
+/// ponytail: player_client=visionos – seit yt-dlp 2026.10.26 liefern die anonymen Standard-Clients
+/// (tv_samsung) Stream-URLs, die mpv mit 403 abgewiesen werden. visionos braucht keinen PO-Token und liefert HLS.
+pub const ANON_YTDL_OPTIONS: &str = "extractor-args=youtube:player_client=visionos";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Account {
@@ -1063,7 +1096,7 @@ async fn browser_cookies() -> Result<Vec<(String, String)>, String> {
         return Ok(l.cookies);
     }
     let browser = COOKIES.clone().ok_or("Not signed in to YouTube in a browser")?;
-    let file = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/tubequ/cookies.tmp");
+    let file = cache_dir().join("cookies.tmp");
     tokio::process::Command::new("yt-dlp")
         .args(["--cookies-from-browser", &browser, "--cookies"])
         .arg(&file)

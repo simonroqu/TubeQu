@@ -23,10 +23,10 @@ pub fn format_for(height: u32) -> String {
 /// (sonst ~100 Übersetzungen). Geladen wird eine Spur erst beim Einschalten – keine Extra-Anfrage beim Start.
 const SUBS_RAW: &str = "write-auto-subs=,sub-langs=(de|en).*";
 
-/// `loadfile`-Optionen für den zweiten Versuch mit Browser-Login. Der Wert enthält Kommas, darum
+/// `loadfile`-Optionen für den zweiten Versuch mit anderen yt-dlp-Optionen. Der Wert enthält Kommas, darum
 /// mpvs Längen-Schreibweise `%n%wert` (sonst trennt mpv die Optionen dort).
-fn with_login(opts: &str, login: &str) -> String {
-    let raw = format!("{SUBS_RAW},{login}");
+fn with_raw(opts: &str, extra: &str) -> String {
+    let raw = format!("{SUBS_RAW},{extra}");
     let raw = format!("ytdl-raw-options=%{}%{raw}", raw.len());
     if opts.is_empty() { raw } else { format!("{opts},{raw}") }
 }
@@ -47,11 +47,10 @@ impl Hooks<Video> for TubeHooks {
         // ponytail: TUBEQU_NO_NORM=1 schaltet den Angleich ab (Gegenprobe bei Lautstärke-Spitzen).
         let norm = if std::env::var_os("TUBEQU_NO_NORM").is_some() { "" } else { "lavfi=[dynaudnorm=f=250:g=15:p=0.95]," };
         i.set_property("af", format!("{norm}@fade:lavfi=[volume=1]"))?;
-        // Wert ohne Komma: mpv trennt die Optionen an Kommas.
-        // ponytail: player_client=visionos – seit yt-dlp 2026.10.26 liefern die Standard-Clients
-        // (tv_samsung) Stream-URLs, die mpv mit 403 abgewiesen werden. visionos braucht keinen
-        // PO-Token und liefert HLS. Wenn auch das kippt: Client-Liste in yt-dlp `_DEFAULT_CLIENTS` prüfen.
-        i.set_property("ytdl-raw-options", format!("{SUBS_RAW},extractor-args=youtube:player_client=visionos"))
+        // Zuerst anonym (visionos: 1 Anfrage, kein JavaScript, kein PO-Token = schnell). Mit Login dauert es Sekunden
+        // länger (Webseite, JS-Aufgabe über node, PO-Token), darum nur als Zweitversuch (`retry_opts`).
+        // Werte ohne Komma: mpv trennt die Optionen an Kommas.
+        i.set_property("ytdl-raw-options", format!("{SUBS_RAW},{}", crate::youtube::ANON_YTDL_OPTIONS))
     }
 
     fn save(&self, v: &Video, pos: f64, dur: f64) {
@@ -89,10 +88,10 @@ impl Hooks<Video> for TubeHooks {
         }
     }
 
-    /// Altersbeschränkt: der eine zweite Versuch läuft mit Browser-Login.
-    fn retry_opts(&self, log: &[String], opts: &str) -> Option<String> {
-        let login = log.iter().any(|l| l.contains("confirm your age")).then(crate::youtube::login_ytdl_options).flatten()?;
-        Some(with_login(opts, &login))
+    /// Anonym gescheitert (Bot-Sperre der IP, altersbeschränkt, 403 …): der eine zweite Versuch läuft mit Browser-Login
+    /// + PO-Token. Ohne Login gibt es keine Alternative, dann einfach nochmal dasselbe.
+    fn retry_opts(&self, _log: &[String], opts: &str) -> Option<String> {
+        Some(with_raw(opts, &crate::youtube::login_ytdl_options()?))
     }
 }
 

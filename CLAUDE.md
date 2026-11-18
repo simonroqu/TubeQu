@@ -86,7 +86,8 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
 - **Getestet (Waydroid, 2026-11-18, 4 Anfragen, kein Bot-Check):** Start, Bubble, Hinweis ohne Empfehlungen (ohne Anfrage),
   Suche (Karten mit LIVE/Dauer, Aufrufe, Datum), Abspielen über NewPipeExtractor mit DASH-Manifest (läuft durch, > 1 min geprüft; 6 Anfragen). Noch nicht live
   geprüft: Livestream (HLS), Startseiten-Empfehlungen nach geschauten Videos, Nachladen.
-`cd android && ./gradlew assembleDebug`.
+`cd android && ./gradlew assembleDebug`. Für Nutzer: `./build-apk.sh` / `build-apk.ps1` (siehe `~/Work/aniqu/CLAUDE.md`
+Abschnitt Android), TubeQu-Zusatz `extra-apk.sh` (libclang). Windows-Bündel: `extra-bundle.sh` legt rustypipe-botguard.exe dazu.
 
 ## Aufbau (`src/` = GTK-App, `core/` = Crate `tubequ-core` ohne Oberfläche: `youtube`, `fmt`, `progress`, `lists`, `sponsorblock`)
 
@@ -118,7 +119,7 @@ Muster: Netzwerk nie im GTK-Thread. `glib::spawn_future_local(async { bg(fut).aw
 | Suche | mit Login `yt-dlp --cookies-from-browser … ytsearchall:<q>` (personalisiert), sonst/bei Fehler rustypipe | gemeinsamer Code mit Startseite: `ytdlp_page` |
 | Startseite (persönliche Empfehlungen) | `yt-dlp --cookies-from-browser … :ytrec`; Android angemeldet: innertube `browse` (`feed_page`) | Datum nur ungefähr (`youtubetab:approximate_date`), Aufrufe fehlen oft; ohne Login eigene Empfehlungen aus ähnlichen Videos |
 | Abspielen (Android) | NewPipeExtractor (Kotlin), anonym, vorher `throttle()` | siehe Abschnitt Android |
-| Abspielen | mpv → ytdl_hook → yt-dlp, **anonym**, `player_client=visionos` (HLS, kein PO-Token) | Format über `ytdl-format`, Qualität in `~/.config/tubequ/quality`. Standard-Clients von yt-dlp 2026.10.26 (`tv_samsung`, `visionos`, `web`): `tv_samsung`-Streams (`c=TVHTML5`) bekommen seit 2026-11-16 unregelmäßig 403 → „Couldn't load video“ |
+| Abspielen | mpv → ytdl_hook → yt-dlp; zuerst anonym `player_client=visionos` (`ANON_YTDL_OPTIONS`, schnell); scheitert das (Bot-Sperre, Alter, 403), Zweitversuch mit Browser-Login **Cookies + Konto + PO-Token**, `player_client=web_safari` (HLS; `login_ytdl_options`) | Format über `ytdl-format`, Qualität in `~/.config/tubequ/quality`. Standard-Clients von yt-dlp 2026.10.26 (`tv_samsung`, `visionos`, `web`): `tv_samsung`-Streams (`c=TVHTML5`) bekommen seit 2026-11-16 unregelmäßig 403 → „Couldn't load video“ |
 | Als gesehen melden | `youtubei/v1/player` per `innertube` (Cookies, Konto) → `playbackTracking`; Ping an `videostatsPlaybackUrl` (Verlauf), bei Pause/Videowechsel/Stopp Ping an `videostatsWatchtimeUrl` mit echter Position (`cmt`, `st=0`, `et=pos`) | 1 Anfrage über `throttle()`; Pings an s.youtube.com ungedrosselt. **Nicht** `yt-dlp --mark-watched`: meldet immer `len-1` → Video bei YouTube ganz gesehen. Abspielen selbst bleibt ohne Login |
 | Thumbnails/Avatare | `i.ytimg.com` / yt3 per reqwest, Cache `~/.cache/tubequ/thumbs` | zählt nicht zum Limit, max. 6 parallel |
 | SponsorBlock | sponsor.ajay.app | zählt nicht zum Limit |
@@ -137,10 +138,17 @@ Bekannte Lücken (nicht nochmal „neu entdecken“):
   Kanal-Logo dann über die (zwischengespeicherte) Kanal-Anfrage. Fehlerberichte von rustypipe liegen
   in `~/.cache/tubequ/rustypipe_reports/` (mit kompletter YouTube-Antwort) – erste Anlaufstelle.
 - rustypipe `player()` scheitert („could not get deobf data“) → rustypipe kann **nicht** abspielen.
-- Mit Browser-Cookies abspielen → 403 auf die Streams. Darum: Abspielen anonym.
-  Ausnahme altersbeschränkte Videos („Sign in to confirm your age“): der eine automatische Zweitversuch
-  (`player.rs`, `retried`) lädt dann mit `youtube::login_ytdl_options` (Browser-Cookies + Konto-Header,
-  `player_client=tv`) als `ytdl-raw-options` pro Datei (`with_login`, mpv-Schreibweise `%n%wert`). Keine Extra-Anfrage.
+- **Abspielen mit Login als Zweitversuch (seit 2026-11-18, gegen die Bot-Sperre der IP):** Erst anonym (visionos), weil der
+  Login-Weg spürbar langsamer lädt (Webseite, JS-Aufgabe über node, PO-Token; vom Nutzer bemerkt, darum umgedreht).
+  Login-Weg: Cookies + Konto-Header +
+  PO-Token. Den Token erzeugt `rustypipe-botguard` (Programm, lokal), das yt-dlp-Plugin `yt-dlp-get-pot-rustypipe`
+  (.whl in `~/.config/yt-dlp/plugins` bzw. `%APPDATA%\yt-dlp\plugins`) reicht ihn weiter. Installiert von
+  `install.sh`/`extra-deps.sh`/`extra-deps.ps1`/`extra-bundle.sh` (Windows: exe neben tubequ.exe). Client muss
+  `web_safari` sein: yt-dlps Standard mit Login ist `web_embedded`, dafür fordert yt-dlp keinen Token an → 403 (getestet).
+  Der eine Zweitversuch (`retry_opts`, `with_raw`, mpv-Schreibweise `%n%wert`) nimmt den Login, wenn der anonyme Abruf
+  scheitert (auch altersbeschränkte Videos); kostet dann 1 Anfrage mehr.
+  `main.rs` hängt Programmordner, `~/.local/bin`, `~/.cargo/bin`, Homebrew an PATH (Finder/Startmenü kennen sie nicht).
+  Browser-Login wird auch in macOS-/Windows-Profilordnern gesucht (`COOKIES`).
 - Liken ist bewusst nicht eingebaut.
 - Eigener Google-Login ohne Browser geht nicht: eingebettete Browser blockiert Google beim Login,
   TV-/OAuth-Login für YouTube ist gesperrt (yt-dlp hat ihn 2024 entfernt). Darum Browser-Cookies.
@@ -164,8 +172,7 @@ intern ab Anfang). Start lädt die Startseite nicht neu, wenn `home.jsonl` < `CA
 Bot-Sperre („Sign in to confirm you're not a bot“, IP-bezogen, läuft von selbst aus) wurde zweimal
 ausgelöst: durch Testskripte, die mpv/yt-dlp am Limit vorbei starteten (~15 Extraktionen in Minuten),
 und durch ~12 App-Neustarts in einer Stunde, als Limit/Cache noch nur im Speicher lagen.
-Ein Fix mit Cookies + PO-Token (rustypipe-botguard, yt-dlp-Plugin `yt-dlp-get-pot-rustypipe`)
-funktionierte, wurde aber **auf Wunsch komplett zurückgebaut** – nicht ungefragt wieder einbauen.
+Fix: Abspielen mit Login + PO-Token (oben, seit 2026-11-18 wieder drin, auf Wunsch des Nutzers).
 
 Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschlich 403 zeigen
 (anderer User-Agent). Aussagekräftig ist nur echtes Abspielen mit mpv.
