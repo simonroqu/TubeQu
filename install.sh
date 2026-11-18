@@ -30,7 +30,9 @@ if ! command -v cargo >/dev/null; then
   PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-cargo update -p qu-core   # neuester quCore-Stand (Cargo.lock hält sonst den alten fest)
+# neuester quCore-Stand (Cargo.lock hält sonst den alten fest); schlägt fehl, wenn Cargo.lock qu-core noch nicht
+# als Git-Quelle kennt (z. B. alter Pfad-Eintrag) – dann löst cargo build es ohnehin frisch auf.
+cargo update -p qu-core 2>/dev/null || true
 cargo build --release
 # Programm, Icon und Startmenü-Eintrag (Texte aus qu.toml) legt die App selbst an.
 "./target/release/$name" --install
