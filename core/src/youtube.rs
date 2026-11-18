@@ -71,6 +71,8 @@ pub enum More {
     Yt(Paginator<VideoItem>),
     /// yt-dlp mit Login (Startseite `:ytrec`, Suche `ytsearchall:…`): ab diesem Eintrag weiter.
     YtDlp(String, usize),
+    /// YouTube-Startseite über innertube (Login vom Desktop, Fernseher/Handy): Fortsetzungs-Token.
+    Feed(String),
 }
 
 impl From<Paginator<VideoItem>> for Page {
@@ -211,6 +213,7 @@ pub async fn suggestions(query: String) -> Vec<String> {
 pub async fn more(m: More) -> Result<Page, String> {
     match m {
         More::YtDlp(target, start) => ytdlp_page(target, start).await,
+        More::Feed(token) => feed_page(Some(token)).await,
         More::Yt(p) => {
             throttle().await?;
             let next = p.next(RP.query()).await.map_err(|e| e.to_string())?;
@@ -539,7 +542,17 @@ pub fn video_from_json(j: &serde_json::Value) -> Option<Video> {
 
 /// Startseite: deine YouTube-Empfehlungen (mit Login), sonst eigene aus ähnlichen Videos.
 pub async fn home() -> Result<Page, String> {
-    let page = if COOKIES.is_none() {
+    let page = if COOKIES.is_none() && crate::pair::stored().is_some() {
+        // Fernseher/Handy: kein yt-dlp, aber Login vom Desktop → dieselbe Startseite wie auf youtube.com.
+        match feed_page(None).await {
+            Ok(p) if !p.videos.is_empty() => Ok(p),
+            Ok(_) => own_recommendations().await,
+            Err(e) => {
+                eprintln!("YouTube-Startseite nicht verfügbar, nutze eigene Empfehlungen: {e}");
+                own_recommendations().await
+            }
+        }
+    } else if COOKIES.is_none() {
         own_recommendations().await
     } else {
         match ytdlp_page(":ytrec".into(), 0).await {
@@ -555,6 +568,93 @@ pub async fn home() -> Result<Page, String> {
         save_home(p);
     }
     page
+}
+
+/// YouTube-Startseite über innertube mit dem Login vom Desktop (`pair`): 1 Anfrage pro Seite.
+/// `None` = erste Seite, sonst Fortsetzungs-Token der vorigen.
+async fn feed_page(token: Option<String>) -> Result<Page, String> {
+    let key = format!("feed:{}:{}", account(), token.as_deref().unwrap_or(""));
+    if let Some(p) = cached(&key) {
+        return Ok(p);
+    }
+    let cookies = browser_cookies().await?;
+    let mut body = serde_json::json!({ "context": innertube_context() });
+    match token {
+        Some(t) => body["continuation"] = t.into(),
+        None => body["browseId"] = "FEwhat_to_watch".into(),
+    }
+    let text = innertube(&cookies, account(), "browse", &body).await?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let page = parse_feed(&json);
+    store(key, &page);
+    Ok(page)
+}
+
+/// Startseiten-Antwort (erste Seite oder Fortsetzung) → Videos + Token. Werbung (`adSlotRenderer`) und das
+/// Shorts-Regal (`richSectionRenderer`) fallen weg, weil nur direkte `lockupViewModel` zählen.
+fn parse_feed(json: &serde_json::Value) -> Page {
+    let first = json.pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/richGridRenderer/contents");
+    let more = json["onResponseReceivedActions"].as_array().into_iter().flatten().filter_map(|a| a.pointer("/appendContinuationItemsAction/continuationItems"));
+    let items: Vec<&serde_json::Value> = first.into_iter().chain(more).filter_map(|v| v.as_array()).flatten().collect();
+    let videos = items.iter().filter_map(|i| i.pointer("/richItemRenderer/content/lockupViewModel")).filter_map(video_from_lockup).collect();
+    let next = items
+        .iter()
+        .find_map(|i| i.pointer("/continuationItemRenderer/continuationEndpoint/continuationCommand/token")?.as_str())
+        .map(|t| More::Feed(t.to_string()));
+    Page { videos, next }
+}
+
+/// Ein Video aus einem `lockupViewModel`. Ohne Dauer und ohne LIVE-Abzeichen (angekündigt, Playlist, …) → `None`.
+/// ponytail: „Nur für Mitglieder“ wird nicht erkannt; filtern, falls solche Videos auftauchen.
+fn video_from_lockup(l: &serde_json::Value) -> Option<Video> {
+    if l["contentType"] != "LOCKUP_CONTENT_TYPE_VIDEO" {
+        return None;
+    }
+    let md = &l["metadata"]["lockupMetadataViewModel"];
+    let rows = md.pointer("/metadata/contentMetadataViewModel/metadataRows")?.as_array()?;
+    let part = |r: usize, p: usize| rows.get(r)?.pointer(&format!("/metadataParts/{p}/text/content"))?.as_str().map(String::from);
+    let channel_part = rows.first()?.pointer("/metadataParts/0/text")?;
+    let badges: Vec<&serde_json::Value> = l
+        .pointer("/contentImage/thumbnailViewModel/overlays")?
+        .as_array()?
+        .iter()
+        .filter_map(|o| o.pointer("/thumbnailBottomOverlayViewModel/badges")?.as_array())
+        .flatten()
+        .map(|b| &b["thumbnailBadgeViewModel"])
+        .collect();
+    let is_live = badges.iter().any(|b| b["badgeStyle"].as_str().is_some_and(|s| s.contains("LIVE")) || b["text"] == "LIVE");
+    let duration = badges.iter().find_map(|b| parse_duration(b["text"].as_str()?));
+    if !is_live && duration.is_none() {
+        return None;
+    }
+    Some(Video {
+        id: l["contentId"].as_str()?.to_string(),
+        title: md.pointer("/title/content")?.as_str()?.to_string(),
+        channel: part(0, 0).unwrap_or_default(),
+        channel_id: channel_part.pointer("/commandRuns/0/onTap/innertubeCommand/browseEndpoint/browseId").and_then(|v| v.as_str()).map(String::from),
+        duration,
+        is_live,
+        views: part(1, 0).and_then(|t| parse_views(&t)),
+        published: if is_live { None } else { part(1, 1) },
+        published_at: None,
+    })
+}
+
+/// „1:19:44“ → Sekunden.
+fn parse_duration(t: &str) -> Option<u32> {
+    t.split(':').try_fold(0u32, |acc, p| Some(acc * 60 + p.parse::<u32>().ok()?)).filter(|_| t.contains(':'))
+}
+
+/// „487K views“, „1.2M views“, „13 views“ → Zahl (gerundet wie bei YouTube).
+fn parse_views(t: &str) -> Option<u64> {
+    let n = t.split_whitespace().next()?.replace(',', "");
+    let (num, mult) = match n.chars().last()? {
+        'K' => (&n[..n.len() - 1], 1e3),
+        'M' => (&n[..n.len() - 1], 1e6),
+        'B' => (&n[..n.len() - 1], 1e9),
+        _ => (n.as_str(), 1.0),
+    };
+    Some((num.parse::<f64>().ok()? * mult).round() as u64)
 }
 
 /// Letzte Startseite auf der Festplatte: beim App-Start sofort zeigen, während die neue lädt.
@@ -1251,5 +1351,26 @@ mod tests {
             println!("Startseite: {} Videos, erstes: {:?}", h.videos.len(), h.videos.first().map(|v| &v.title));
             assert!(!h.videos.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod feed_tests {
+    /// Echte Antwort von YouTube (2026-11-18), gekürzt: 2 Videos, Werbung, Shorts-Regal, Fortsetzung.
+    #[test]
+    fn parses_home_feed() {
+        let json: serde_json::Value = serde_json::from_str(include_str!("../testdata/home_feed.json")).unwrap();
+        let p = super::parse_feed(&json);
+        let ids: Vec<_> = p.videos.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["tOZ_20w8OSM", "1gsX2ZnngJA"]);
+        let v = &p.videos[0];
+        assert_eq!((v.title.as_str(), v.channel.as_str()), ("The BEST GTA game?", "Jake Baldino"));
+        assert_eq!(v.channel_id.as_deref(), Some("UC7s6t5KCNwRkb7U_3-E1Tpw"));
+        assert_eq!((v.duration, v.views, v.published.as_deref()), (Some(26 * 60 + 57), Some(487_000), Some("4 days ago")));
+        assert!(matches!(p.next, Some(super::More::Feed(ref t)) if t.starts_with("4qmF")));
+        assert_eq!(super::parse_duration("1:19:44"), Some(4784));
+        assert_eq!(super::parse_duration("LIVE"), None);
+        assert_eq!(super::parse_views("1.2M views"), Some(1_200_000));
+        assert_eq!(super::parse_views("1 view"), Some(1));
     }
 }

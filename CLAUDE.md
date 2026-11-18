@@ -72,6 +72,10 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
   (`mark_watched`, 1 Anfrage) und Position beim Verlassen (Ping). „Sign out“ löscht `login.json`. Abspielen bleibt anonym.
   Getestet 2026-11-18: Code in Waydroid, Dummy-Login vom Desktop → angemeldet, zweiter Versuch findet den Port zu,
   Abmelden; echte Browser-Cookies am Desktop gefunden (nur gezählt, nicht gesendet).
+  **Startseite angemeldet** = YouTube-Startseite wie auf youtube.com: innertube `browse` `FEwhat_to_watch` mit dem
+  übertragenen Login (`feed_page`/`parse_feed`, 1 Anfrage pro Seite, Nachladen über Fortsetzungs-Token `More::Feed`);
+  Werbung und Shorts-Regal fallen weg, bei Fehler eigene Empfehlungen. Testdatei `core/testdata/home_feed.json`
+  (echte Antwort 2026-11-18, gekürzt) – ändert YouTube das Format, dort neu abgleichen.
   Noch nicht: Abo-Feed/YouTube-Verlauf/„Watch later“ von YouTube anzeigen (rustypipe-Feature `userdata` könnte das).
 - Startseite neu laden (wie Desktop): Home-Knopf auf der Startseite und nach An-/Abmelden (`Nav.reloadHome`, einmalig über
   `takeReload`, leert vorher den Cache = bis 3 Anfragen). Zurückkommen lädt nicht neu.
@@ -112,7 +116,7 @@ Muster: Netzwerk nie im GTK-Thread. `glib::spawn_future_local(async { bg(fut).aw
 | Video-Details, Vorschläge | rustypipe 0.11.4, `Language::En` | |
 | Kanalseite (Name, Avatar, Abos, Videos) | `yt-dlp -J --flat-playlist …/channel/<id>/videos` + `youtubetab:approximate_date` (mit Login: Cookies + Konto-Header) | 1 Anfrage, Nachladen über `ytdlp_page`; Datum ungefähr, Aufrufe + Dauer vorhanden; Avatar = `avatar_uncropped` mit `=s176`; Abonnentenzahl = `channel_follower_count` |
 | Suche | mit Login `yt-dlp --cookies-from-browser … ytsearchall:<q>` (personalisiert), sonst/bei Fehler rustypipe | gemeinsamer Code mit Startseite: `ytdlp_page` |
-| Startseite (persönliche Empfehlungen) | `yt-dlp --cookies-from-browser … :ytrec` | Datum nur ungefähr (`youtubetab:approximate_date`), Aufrufe fehlen oft; ohne Login eigene Empfehlungen aus ähnlichen Videos |
+| Startseite (persönliche Empfehlungen) | `yt-dlp --cookies-from-browser … :ytrec`; Android angemeldet: innertube `browse` (`feed_page`) | Datum nur ungefähr (`youtubetab:approximate_date`), Aufrufe fehlen oft; ohne Login eigene Empfehlungen aus ähnlichen Videos |
 | Abspielen (Android) | NewPipeExtractor (Kotlin), anonym, vorher `throttle()` | siehe Abschnitt Android |
 | Abspielen | mpv → ytdl_hook → yt-dlp, **anonym**, `player_client=visionos` (HLS, kein PO-Token) | Format über `ytdl-format`, Qualität in `~/.config/tubequ/quality`. Standard-Clients von yt-dlp 2026.10.26 (`tv_samsung`, `visionos`, `web`): `tv_samsung`-Streams (`c=TVHTML5`) bekommen seit 2026-11-16 unregelmäßig 403 → „Couldn't load video“ |
 | Als gesehen melden | `youtubei/v1/player` per `innertube` (Cookies, Konto) → `playbackTracking`; Ping an `videostatsPlaybackUrl` (Verlauf), bei Pause/Videowechsel/Stopp Ping an `videostatsWatchtimeUrl` mit echter Position (`cmt`, `st=0`, `et=pos`) | 1 Anfrage über `throttle()`; Pings an s.youtube.com ungedrosselt. **Nicht** `yt-dlp --mark-watched`: meldet immer `len-1` → Video bei YouTube ganz gesehen. Abspielen selbst bleibt ohne Login |
