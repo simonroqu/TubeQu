@@ -4,6 +4,7 @@
 
 pub mod fmt;
 pub mod lists;
+pub mod pair;
 pub mod progress;
 pub mod sponsorblock;
 pub mod youtube;

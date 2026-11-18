@@ -12,7 +12,7 @@ keywords = ["youtube", "video", "stream", "live"]
 # Menü oben links. Eingebaut: back, home, search, busy, menu (Burger).
 [nav]
 top = ["menu", "back", "home", "search", "busy"]
-menu = ["later", "history", "account"]
+menu = ["later", "history", "tv", "account"]
 
 [[nav.item]]
 id = "later"
@@ -25,6 +25,11 @@ icon = "history"
 tooltip = "History"
 
 # Kontozeile (Profilbild + aufklappende Kontoliste) füllt tubequ selbst; klappt nach rechts auf.
+[[nav.item]]
+id = "tv"
+icon = "tv"
+tooltip = "Sign in on TV"
+
 [[nav.item]]
 id = "account"
 slot = true

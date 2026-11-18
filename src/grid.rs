@@ -668,6 +668,12 @@ impl Grid {
         }
     }
 
+    /// Raster leeren und nur einen Hinweis zeigen (z. B. Ergebnis von „Sign in on TV“).
+    pub fn note(&self, text: &str) {
+        self.clear();
+        self.message(text);
+    }
+
     fn message(&self, text: &str) {
         self.status.set_text(text);
         self.status.set_visible(true);

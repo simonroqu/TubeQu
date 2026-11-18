@@ -48,6 +48,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     let search_button = navbar.button("search").clone();
     let history_button = navbar.button("history").clone();
     let later_button = navbar.button("later").clone();
+    let tv_button = navbar.button("tv").clone();
     // Konto (nur mit Browser-Login): Profilbild des aktiven Kontos unten in der Spalte. Klick klappt
     // daneben die übrigen Konten nach rechts auf (Bubble wird zum liegenden U).
     let account_pic = gtk::Image::builder()
@@ -357,6 +358,31 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         }
     });
     root.add_overlay(&search.widget);
+
+    // „Sign in on TV“: Code vom Fernseher eintippen, Browser-Login übers Heimnetz hinschicken (`pair`).
+    // Keine Anfrage an YouTube (Cookies liest yt-dlp lokal aus dem Browser).
+    let pairing = search::SearchModal::input("Code shown on your TV, e.g. 112-4829-1374", {
+        let (grid, nav, section) = (grid.clone(), nav.clone(), section.clone());
+        move |code| {
+            nav.home();
+            section.set("");
+            grid.set_home(false);
+            grid.note("Sending your sign-in to the TV…");
+            let grid = grid.clone();
+            glib::spawn_future_local(async move {
+                let r = bg(async move { tubequ_core::pair::send(code, youtube::login_for_tv().await?).await }).await;
+                grid.note(&match r {
+                    Ok(()) => "Signed in on your TV.".to_string(),
+                    Err(e) => e,
+                });
+            });
+        }
+    });
+    root.add_overlay(&pairing.widget);
+    tv_button.connect_clicked({
+        let pairing = pairing.clone();
+        move |_| pairing.open()
+    });
     search_button.connect_clicked({
         let search = search.clone();
         move |_| search.open()

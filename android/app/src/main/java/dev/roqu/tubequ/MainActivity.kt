@@ -11,7 +11,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import androidx.media3.common.MimeTypes
 import dev.roqu.qu.*
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +82,7 @@ sealed interface Screen {
     data class Results(val query: String) : Screen
     data object Later : Screen
     data object History : Screen
+    data object Account : Screen
     data class Watch(val video: Clip) : Screen
 }
 
@@ -102,6 +112,7 @@ fun App(link: String?) {
         buttons = {
             IconButton(QuIcons.later, "Watch later") { nav.open(Screen.Later) }
             IconButton(QuIcons.history, "History") { nav.open(Screen.History) }
+            AccountButton { nav.open(Screen.Account) }
         },
     ) { page ->
         val play = { v: Clip -> nav.open(Screen.Watch(v)) }
@@ -110,7 +121,63 @@ fun App(link: String?) {
             is Screen.Results -> FeedPage(page.query, { search(page.query) }, play)
             Screen.Later -> ListPage("Watch later", later(), "Nothing saved yet", play)
             Screen.History -> ListPage("History", history(), "Nothing watched yet", play)
+            Screen.Account -> AccountPage { nav.back() }
             is Screen.Watch -> WatchPage(page.video)
+        }
+    }
+}
+
+/** Konto in der Bubble: Profilbild, wenn angemeldet (wie am Desktop), sonst das Konto-Symbol. */
+@Composable
+fun AccountButton(open: () -> Unit) {
+    val photo = remember { signedIn()?.photo }
+    if (photo == null) IconButton(QuIcons.account, "Sign in", onClick = open)
+    else androidx.compose.foundation.layout.Box(
+        androidx.compose.ui.Modifier.size(40.dp).clip(androidx.compose.foundation.shape.CircleShape)
+            .tvFocus(androidx.compose.foundation.shape.CircleShape, 1.1f).clickable(onClickLabel = "Account", onClick = open),
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        coil3.compose.AsyncImage(photo, "Account",
+            modifier = androidx.compose.ui.Modifier.size(26.dp).clip(androidx.compose.foundation.shape.CircleShape))
+    }
+}
+
+/**
+ * Anmelden ohne Browser: großer Code, den man in der Desktop-App unter „Sign in on TV“ eintippt; der Desktop schickt
+ * seinen Browser-Login übers Heimnetz (tubequ-core `pair`). Angemeldet: Konto und „Sign out“.
+ */
+@Composable
+fun AccountPage(done: () -> Unit) {
+    var account by remember { mutableStateOf(signedIn()) }
+    var code by remember { mutableStateOf<PairCode?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(account) {
+        if (account != null) return@LaunchedEffect
+        try {
+            val c = pairCode()
+            code = c
+            account = pairReceive(c.secret)
+        } catch (e: Exception) { error = message(e) }
+    }
+    androidx.compose.foundation.layout.Column(
+        androidx.compose.ui.Modifier.fillMaxSize().safeDrawingPadding().padding(start = 32.dp, end = 32.dp, top = TopSpace),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp),
+    ) {
+        val a = account
+        if (a != null) {
+            androidx.compose.material3.Text(a.name.ifEmpty { "Signed in" }, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Fg)
+            if (a.email.isNotEmpty()) androidx.compose.material3.Text(a.email, color = Dim)
+            androidx.compose.material3.Text("Your YouTube history and subscriptions use this account. Videos still play without it.", color = Dim)
+            androidx.compose.material3.TextButton(onClick = { signOut(); account = null; done() },
+                modifier = androidx.compose.ui.Modifier.tvFocus(androidx.compose.foundation.shape.RoundedCornerShape(50))) {
+                androidx.compose.material3.Text("Sign out", color = Fg)
+            }
+        } else {
+            androidx.compose.material3.Text("Sign in with your computer", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Fg)
+            androidx.compose.material3.Text("On your computer, open TubeQu, choose the TV icon in the menu (Sign in on TV) and enter this code:", color = Dim)
+            androidx.compose.material3.Text(code?.display ?: "…", fontSize = 56.sp, fontWeight = FontWeight.Bold, color = Accent)
+            androidx.compose.material3.Text("Both devices must be on the same network. The code works only while this page is open.", color = Dim, fontSize = 13.sp)
+            error?.let { androidx.compose.material3.Text(it, color = Red) }
         }
     }
 }
@@ -197,6 +264,15 @@ fun ListPage(title: String, list: List<Card>, empty: String, play: (Clip) -> Uni
 fun WatchPage(video: Clip) {
     // Aus einem Link geöffnet: Titel/Kanal erst aus der Extraktion (für Fortschritt und „Continue watching“).
     var current by remember { mutableStateOf(video) }
+    // Angemeldet: wie am Desktop ins YouTube-Verlauf eintragen (1 Anfrage) und beim Verlassen die Position melden.
+    val account = remember { signedIn() != null }
+    var last by remember { mutableStateOf(0.0) }
+    if (account) {
+        LaunchedEffect(video.id) { markWatched(video.id) }
+        DisposableEffect(video.id) {
+            onDispose { if (last > 0) kotlinx.coroutines.GlobalScope.launch { reportPosition(video.id, last) } }
+        }
+    }
     VideoPlayer(
         load = {
             throttle()
@@ -235,7 +311,7 @@ fun WatchPage(video: Clip) {
             }
         },
         message = ::message,
-        save = { pos, dur -> if (current.title.isNotEmpty()) record(current, pos, dur) },
+        save = { pos, dur -> last = pos; if (current.title.isNotEmpty()) record(current, pos, dur) },
         skips = { segments(video.id).map { Skip(it.start, it.end, it.label) } },
         autoSkip = true,
     )

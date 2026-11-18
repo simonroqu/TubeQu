@@ -227,6 +227,12 @@ const HOME_BATCH: usize = 30;
 /// Browser-Cookies für yt-dlp (`--cookies-from-browser`), einmal beim Start gesucht.
 /// Firefox-artige Browser (Zen, Firefox, LibreWolf): das zuletzt benutzte Profil.
 /// Sonst Chromium-artige, falls installiert. `None` = kein Browser, App läuft ohne Login.
+/// Mit Login: Browser-Cookies (Desktop) oder vom Desktop übertragener Login (Fernseher/Handy, `pair`).
+/// Nur für die innertube-Aufrufe (Verlauf, Abo, Konto); yt-dlp-Wege hängen weiter an `COOKIES`.
+pub fn logged_in() -> bool {
+    COOKIES.is_some() || crate::pair::stored().is_some()
+}
+
 pub static COOKIES: LazyLock<Option<String>> = LazyLock::new(|| {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let firefox_like = [".config/zen", ".zen", ".mozilla/firefox", ".config/mozilla/firefox", ".librewolf"];
@@ -431,7 +437,7 @@ pub async fn details(id: String) -> Result<Details, String> {
 /// Tracking-Adressen; die Playback-Meldung trägt ins Verlauf ein, die echte Position kommt später über
 /// `report_position` (nicht wie `yt-dlp --mark-watched`, das immer „bis zum Ende geschaut“ meldet).
 pub async fn mark_watched(id: String) -> Result<(), String> {
-    if COOKIES.is_none() {
+    if !logged_in() {
         return Ok(());
     }
     let cookies = browser_cookies().await?;
@@ -952,6 +958,10 @@ fn innertube_context() -> serde_json::Value {
 /// ohne URL bricht es mit Fehler ab, schreibt die Cookie-Datei aber trotzdem – ohne Netzwerk.
 /// Die Datei liegt nur kurz im Cache.
 async fn browser_cookies() -> Result<Vec<(String, String)>, String> {
+    // Fernseher/Handy: vom Desktop übertragener Login (`pair`), dort gibt es keinen Browser.
+    if let Some(l) = crate::pair::stored() {
+        return Ok(l.cookies);
+    }
     let browser = COOKIES.clone().ok_or("Not signed in to YouTube in a browser")?;
     let file = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/tubequ/cookies.tmp");
     tokio::process::Command::new("yt-dlp")
@@ -964,6 +974,21 @@ async fn browser_cookies() -> Result<Vec<(String, String)>, String> {
     let _ = std::fs::remove_file(&file);
     let cookies = youtube_cookies(&jar);
     if cookies.iter().any(|(k, _)| k == "SAPISID") { Ok(cookies) } else { Err("Not signed in to YouTube in a browser".into()) }
+}
+
+/// Login für den Fernseher (`pair::send`): Browser-Cookies und gewähltes Konto (Name/Bild aus dem Konto-Cache),
+/// ohne Anfrage an YouTube.
+pub async fn login_for_tv() -> Result<crate::pair::Login, String> {
+    let cookies = browser_cookies().await?;
+    let account = account();
+    let a = saved_accounts().into_iter().find(|a| a.index == account);
+    Ok(crate::pair::Login {
+        cookies,
+        account,
+        name: a.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+        email: a.as_ref().map(|a| a.email.clone()).unwrap_or_default(),
+        photo: a.and_then(|a| a.photo),
+    })
 }
 
 /// Eine Anfrage an die interne YouTube-API mit Login (über `throttle()`), Antwort als Text.

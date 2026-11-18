@@ -237,3 +237,70 @@ pub fn add_search(query: String) {
     qu_core::store::add_search(&query);
 }
 
+
+/// Konto, mit dem die App angemeldet ist (vom Desktop übertragen).
+#[derive(uniffi::Record)]
+pub struct Account {
+    pub name: String,
+    pub email: String,
+    pub photo: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct PairCode {
+    /// Für den Bildschirm, z. B. „112-4829-1374“.
+    pub display: String,
+    /// Zum Prüfen (nur an `pair_receive` geben).
+    pub secret: String,
+}
+
+fn account_of(l: tubequ_core::pair::Login) -> Account {
+    Account { name: l.name, email: l.email, photo: l.photo }
+}
+
+/// Angemeldet? (Login vom Desktop übertragen.)
+#[uniffi::export]
+pub fn signed_in() -> Option<Account> {
+    tubequ_core::pair::stored().map(account_of)
+}
+
+#[uniffi::export]
+pub fn sign_out() {
+    tubequ_core::pair::forget();
+}
+
+/// Neuer Code zum Anzeigen; danach `pair_receive(secret)`.
+#[uniffi::export]
+pub fn pair_code() -> Result<PairCode, TubeError> {
+    let (display, secret) = tubequ_core::pair::new_code()?;
+    Ok(PairCode { display, secret })
+}
+
+/// Bricht die Hintergrund-Aufgabe ab, wenn Kotlin nicht mehr wartet (Seite verlassen): sonst bliebe der Port belegt.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Auf den Login vom Desktop warten (keine Anfrage an YouTube).
+#[uniffi::export]
+pub async fn pair_receive(secret: String) -> Result<Account, TubeError> {
+    let mut task = AbortOnDrop(qu_core::RT.spawn(tubequ_core::pair::receive(secret)));
+    let login = (&mut task.0).await.map_err(|e| e.to_string())??;
+    Ok(account_of(login))
+}
+
+/// Video in deinen YouTube-Verlauf (nur angemeldet; 1 Anfrage über `throttle`, wie am Desktop).
+#[uniffi::export]
+pub async fn mark_watched(id: String) {
+    let _ = qu_core::bg(youtube::mark_watched(id)).await;
+}
+
+/// Geschaute Position an YouTube melden (beim Verlassen; Ping, zählt nicht zum Limit, wie am Desktop).
+#[uniffi::export]
+pub async fn report_position(id: String, pos: f64) {
+    let _ = qu_core::bg(youtube::report_position(id, pos)).await;
+}

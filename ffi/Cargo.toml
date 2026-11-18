@@ -17,3 +17,4 @@ path = "uniffi-bindgen.rs"
 tubequ-core = { path = "../core" }
 qu-core = { git = "https://github.com/simonroqu/quCore", default-features = false }
 uniffi = { version = "0.32.2", features = ["cli"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt"] }

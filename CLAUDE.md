@@ -61,6 +61,20 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
   error“, 2026-11-18). Am Desktop war es durch native-tls ohnehin HTTP/1.1.
 - rustypipes JS-Engine `rquickjs` hat keine Android-Bindings → Feature `bindgen` nur für Android (`core/Cargo.toml`), braucht
   libclang; das API-Level dafür setzt qu-cores `build-rust.sh`.
+- **Anmelden auf Fernseher/Handy per Code** (`core/pair.rs`, so gewollt): Android → Bubble-Knopf Konto → Seite zeigt
+  „<IP-Endung>-<8 Ziffern>“ und wartet auf TCP `pair::PORT` (47821). Desktop → Burger-Spalte „Sign in on TV“ (TV-Icon,
+  `SearchModal::input`, nichts im Suchverlauf) → `youtube::login_for_tv` (Browser-Cookies lokal per yt-dlp + Konto aus
+  `accounts.tsv`, **keine** YouTube-Anfrage) → `pair::send` sucht den Fernseher in allen eigenen IPv4-Netzen (erste drei
+  Stellen + IP-Endung, ausgehende Verbindung, darum kein Firewall-Problem) und schickt eine JSON-Zeile. Fernseher prüft die
+  8 Ziffern (Vergleich ohne frühen Abbruch), speichert `login.json` (App-privat), setzt das Konto, schließt den Port; nach
+  3 falschen Codes oder Verlassen der Seite (`AbortOnDrop` in `ffi`) ebenfalls zu. Unverschlüsselt im Heimnetz (bewusst).
+  Angemeldet: `logged_in()`/`browser_cookies()` nehmen den übertragenen Login → YouTube-Verlauf beim Abspielen
+  (`mark_watched`, 1 Anfrage) und Position beim Verlassen (Ping). „Sign out“ löscht `login.json`. Abspielen bleibt anonym.
+  Getestet 2026-11-18: Code in Waydroid, Dummy-Login vom Desktop → angemeldet, zweiter Versuch findet den Port zu,
+  Abmelden; echte Browser-Cookies am Desktop gefunden (nur gezählt, nicht gesendet).
+  Noch nicht: Abo-Feed/YouTube-Verlauf/„Watch later“ von YouTube anzeigen (rustypipe-Feature `userdata` könnte das).
+- Achtung Anfragen: Start der App lädt die Startseite neu, wenn `home.jsonl` älter als 10 min ist (eigene Empfehlungen =
+  bis 3 Anfragen) – bei Tests mit mehreren Neustarts mitzählen.
 - Kanal auf Android über rustypipe (`channel_rp`, ohne Dauer/Aufrufe/Datum), aber noch **keine Kanalseite** in der App.
   Ebenfalls noch nicht: Konto/Abo, Suchvorschläge (nur Verlauf), „Watch later“ setzen, Video-Infos.
 - **Getestet (Waydroid, 2026-11-18, 4 Anfragen, kein Bot-Check):** Start, Bubble, Hinweis ohne Empfehlungen (ohne Anfrage),
@@ -267,7 +281,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   die Link-Weiche es nicht zurück in TubeQu schickt), Mittelklick = Watch later. Fertig Geschautes
   abgedunkelt. Scroll-Position bleibt beim Zurückkommen erhalten.
 - Menü per Tastatur: Esc klappt es auf – auf der Startseite (kein Zurück-Verlauf) und beim Video (im Vollbild verlässt Esc zuerst das Vollbild); sonst bleibt Esc „Zurück“. Pfeil hoch/runter in der Spalte (Watch later, History, Konto; Umlauf), rechts in die obere Reihe (Zurück, Home, Suche), dort links/rechts, links am Anfang bzw. runter zurück in die Spalte; Enter/Leertaste drückt, Esc klappt zu (`menu_key` in `main.rs`). Knöpfe nur dann fokussierbar; `set_focus_visible(true)` zeigt die Markierung (style.css `.bubble button:focus-visible`). Offenes Menü hält die Navigation im Player sichtbar (auch wenn die Leiste weg ist).
-- Nav-Bubble: Burger, Zurück, Home, Suche, Lade-Kreis; Burger klappt die Bubble nach unten auf (Watch later, Verlauf, Konto), Auswahl oder Klick daneben klappt zu. Kein Reload-Knopf. Klick auf den Knopf der Seite, auf der man ist, lädt sie neu.
+- Nav-Bubble: Burger, Zurück, Home, Suche, Lade-Kreis; Burger klappt die Bubble nach unten auf (Watch later, Verlauf, Sign in on TV, Konto), Auswahl oder Klick daneben klappt zu. Kein Reload-Knopf. Klick auf den Knopf der Seite, auf der man ist, lädt sie neu.
 - Lade-Kreis in der Bubble: `crate::Busy::new()` in jeden Ladevorgang mitnehmen (Raster, Nachladen, Video-Details, Konten, Abo); Reload lässt das Alte stehen, bis das Neue da ist.
 - Ansehen-Seite: Infos unter dem Video erst sichtbar, wenn die Details da sind; bis dahin graue Platzhalter in derselben Form (Titel, Profilbild-Kreis, Kanal, Beschreibung) mit durchlaufendem Glanzstreifen (`watch.rs` `skeleton`, style.css `.skeleton`), nicht bei direkt abgespielten Adressen. Kanal-Profilbilder haben bis zum Laden einen grauen Kreis (`.avatar.placeholder`). Suchfeld zeigt beim Öffnen die letzte Suche (markiert); leer oder unverändert = Liste der letzten Suchen, keine Vorschlags-Anfrage.
 - Weiches Scrollen mit dem Mausrad (`smooth.rs`, an jedem ScrolledWindow): Raststufen gleiten statt zu springen; Touchpad bleibt bei GTK.
@@ -291,6 +305,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 - `~/.config/tubequ/account` – Nummer des Google-Kontos im Browser (Standard 0)
 - `~/.cache/tubequ/home.jsonl` – letzte Startseite (sofort beim Start)
 - `~/.cache/tubequ/accounts.tsv` – bekannte Konten (Nummer, Name, E-Mail, Profilbild-URL)
+- Android: `files/tubequ/login.json` – vom Desktop übertragener Login (Cookies, Konto), nur in der App lesbar
 - `~/.cache/tubequ/requests.txt` – Zeitpunkte der YouTube-Anfragen der letzten Stunde (Limit)
 - `~/.cache/tubequ/crash.log` – Panik-Meldung + Backtrace (Hook in `main`), erste Anlaufstelle bei Abstürzen
 - `~/.cache/tubequ/cookies.tmp` – nur kurz während einer innertube-Anfrage, danach gelöscht
