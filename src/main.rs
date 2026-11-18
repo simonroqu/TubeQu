@@ -393,21 +393,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         move |_| search.reset()
     });
 
-    // Vollbild: Kopfzeile und Infos ausblenden, nur noch Video.
-    player.controls.fullscreen.connect_clicked({
-        let window = window.clone();
-        move |_| {
-            if window.is_fullscreen() { window.unfullscreen() } else { window.fullscreen() }
-        }
-    });
-    window.connect_fullscreened_notify({
-        let (watch, fs) = (watch.clone(), player.controls.fullscreen.clone());
-        move |w| {
-            let full = w.is_fullscreen();
-            watch.set_fullscreen(full);
-            fs.set_icon_name(if full { "qu-restore-symbolic" } else { "qu-fullscreen-symbolic" });
-        }
-    });
+    // Vollbild-Knopf und Fenster-Vollbild regelt qu-core (`Nav::set_video_fullscreen`).
     // Player-Höhe an das Seitenverhältnis des Videos anpassen.
     // Endbildschirm „Zur Startseite“.
     player.end_home.connect_clicked({
@@ -495,15 +481,15 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
             // Menü offen: Pfeile/Enter/Esc gehören ihm. Esc öffnet es beim Video (außer im Vollbild: das
             // verlässt Esc zuerst) und auf der Startseite (kein Zurück); sonst bleibt Esc „Zurück“.
             let home = nav.current() == "browse" && nav.history.borrow().is_empty();
-            let menu_esc = key == gdk::Key::Escape && !window.is_fullscreen() && (watching || home);
+            let menu_esc = key == gdk::Key::Escape && !nav.video_fullscreen() && (watching || home);
             if (navbar.menu_open() || menu_esc) && mods.is_empty() && navbar.key(&window, key) {
                 return glib::Propagation::Stop;
             }
             // Miniplayer: nur die Video-Tasten; Pfeile/Ziffern bleiben fürs Raster.
             let mini = !watching && nav.watch.is_mini();
             let handled = match key {
-                gdk::Key::Escape if window.is_fullscreen() => {
-                    window.unfullscreen();
+                gdk::Key::Escape if nav.video_fullscreen() => {
+                    nav.set_video_fullscreen(false);
                     true
                 }
                 gdk::Key::Escape => {
