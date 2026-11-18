@@ -1,7 +1,7 @@
 #!/bin/sh
 # Windows: in MSYS2 (UCRT64) Pakete holen, bauen und mit allen DLLs und GTK-Daten nach target/<Titel>/ legen
 # (bin/, lib/, share/ wie unter MSYS2, dann findet GTK seine Daten relativ zur DLL).
-# Aufgerufen von install.ps1 und .github/workflows/windows.yml.
+# Aufgerufen von install.ps1.
 set -e
 cd "$(dirname "$0")"
 name=$(sed -n 's/^name = "\(.*\)"/\1/p' qu.toml | head -n1)
