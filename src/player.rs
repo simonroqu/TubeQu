@@ -1,4 +1,4 @@
-//! Player-Anbindung: der Player aus qu-core mit Tubequ-Daten – yt-dlp, Fortschritt pro Video (fertig → aus
+//! Player-Anbindung: der Player aus qu-core mit TubeQu-Daten – yt-dlp, Fortschritt pro Video (fertig → aus
 //! „Watch later“), Position an YouTube melden, SponsorBlock (automatisch übersprungen), Tempo pro Kanal,
 //! zweiter Versuch mit Browser-Login bei Altersbeschränkung.
 

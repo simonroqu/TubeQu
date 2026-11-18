@@ -1,4 +1,4 @@
-# Tubequ – YouTube-Client für Linux (Rust + GTK4 + libmpv)
+# TubeQu – YouTube-Client für Linux (Rust + GTK4 + libmpv)
 
 Eigene YouTube-App ohne Werbung, entwickelt auf Omarchy/Hyprland, läuft aber auch ohne Omarchy
 (eingebautes Standard-Theme). Startseite = persönliche YouTube-Empfehlungen, Suche mit Vorschlägen,
@@ -22,13 +22,16 @@ cargo run -- <kanal-link>            # .../channel/UC... öffnet die Kanalseite
 ./install.sh                         # Release-Build nach ~/.local/bin/tubequ + Startmenü-Eintrag + Icon
 ```
 
+Install-Skripte für Linux/macOS/Windows (`install.sh`, `install.ps1`, `windows-bundle.sh`) sind in allen Apps gleich, siehe
+`~/Work/aniqu/CLAUDE.md` Abschnitt Windows.
+
 Eine laufende installierte Instanz bekommt das neue Binary erst nach einem Neustart.
 
 Installiert: `~/.local/bin/tubequ`, `~/.local/share/applications/dev.tubequ.Tubequ.desktop`,
 `~/.local/share/icons/hicolor/scalable/apps/dev.tubequ.Tubequ.svg`. App-ID `dev.tubequ.Tubequ`.
 
 Link-Weiche (nur Omarchy): `install.sh` setzt in `~/.config/hyprland-mimeapps.list` **nur https** auf
-`dev.tubequ.Links.desktop` → `~/.local/bin/tubequ-links` (YouTube-Video/-Kanal → Tubequ, sonst
+`dev.tubequ.Links.desktop` → `~/.local/bin/tubequ-links` (YouTube-Video/-Kanal → TubeQu, sonst
 `omarchy-launch-browser`). http bleibt bei `omarchy-browser.desktop`, weil `omarchy-cmd-default-browser`
 den Browser am http-Eintrag erkennt (sonst Schleife + Super+B kaputt). Test: `TUBEQU_LINKS_DRYRUN=1 tubequ-links <url>`.
 Rückgängig: https-Zeile wieder auf `omarchy-browser.desktop` (Sicherung `.bak-tubequ`).
@@ -164,7 +167,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 - Popover (z. B. Player-Einstellungen) in Theme-Farben, Auswahlpunkte in Akzentfarbe (`theme.rs`).
 - Runde Bilder: Klasse `.avatar` + `overflow(Hidden)` + `halign/valign(Center)` – sonst ist das
   Image-Widget größer als das Bild und die Rundung schneidet nur dessen Ecken.
-- CSS-Priorität: App-CSS (`qu_core::CSS`, Tubequ hat kein eigenes mehr) = `APPLICATION + 1`, `theme.rs` = `APPLICATION`. GTK entscheidet
+- CSS-Priorität: App-CSS (`qu_core::CSS`, TubeQu hat kein eigenes mehr) = `APPLICATION + 1`, `theme.rs` = `APPLICATION`. GTK entscheidet
   bei gleicher Priorität nach Ladereihenfolge, nicht nach Spezifität. GTK-Default-Theme gibt
   `scale highlight` einen blauen Rahmen + `margin: -1px` → bei eigenen Reglern `border: none;
   margin: 0;` und eine `min-height` setzen.
@@ -230,7 +233,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   Seite, nicht deren Inhalt; neuer Weg oder Home leert „Vor“).
 - Geschwindigkeit pro Kanal gemerkt (`speeds.tsv`), sonst normal. Endbildschirm (Nochmal/Startseite).
 - Karten: Rechtsklick-Menü (Watch later, Copy link, Open channel, Open in browser – über **http**, damit
-  die Link-Weiche es nicht zurück in Tubequ schickt), Mittelklick = Watch later. Fertig Geschautes
+  die Link-Weiche es nicht zurück in TubeQu schickt), Mittelklick = Watch later. Fertig Geschautes
   abgedunkelt. Scroll-Position bleibt beim Zurückkommen erhalten.
 - Menü per Tastatur: Esc klappt es auf – auf der Startseite (kein Zurück-Verlauf) und beim Video (im Vollbild verlässt Esc zuerst das Vollbild); sonst bleibt Esc „Zurück“. Pfeil hoch/runter in der Spalte (Watch later, History, Konto; Umlauf), rechts in die obere Reihe (Zurück, Home, Suche), dort links/rechts, links am Anfang bzw. runter zurück in die Spalte; Enter/Leertaste drückt, Esc klappt zu (`menu_key` in `main.rs`). Knöpfe nur dann fokussierbar; `set_focus_visible(true)` zeigt die Markierung (style.css `.bubble button:focus-visible`). Offenes Menü hält die Navigation im Player sichtbar (auch wenn die Leiste weg ist).
 - Nav-Bubble: Burger, Zurück, Home, Suche, Lade-Kreis; Burger klappt die Bubble nach unten auf (Watch later, Verlauf, Konto), Auswahl oder Klick daneben klappt zu. Kein Reload-Knopf. Klick auf den Knopf der Seite, auf der man ist, lädt sie neu.

@@ -498,7 +498,7 @@ impl Grid {
             }
         }));
         add("channel", Box::new(|g, id| (g.on_channel)(id)));
-        // http statt https: geht direkt an den Browser, nicht über die Tubequ-Link-Weiche zurück in die App.
+        // http statt https: geht direkt an den Browser, nicht über die TubeQu-Link-Weiche zurück in die App.
         add("browser", Box::new(|_, id| {
             let _ = gtk::gio::AppInfo::launch_default_for_uri(
                 &format!("http://www.youtube.com/watch?v={id}"),

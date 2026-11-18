@@ -1,3 +1,6 @@
+// Unter Windows ohne zusätzliches Konsolenfenster starten.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod channel;
 mod grid;
 mod lists;
@@ -40,7 +43,7 @@ fn show_account(pic: &gtk::Image, button: &gtk::Button, a: &youtube::Account) {
 
 fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     let display = gdk::Display::default().expect("Display");
-    // Theme, Icons und CSS in Schichten: Kern < App < ~/.config/tubequ/style.css (Tubequ hat kein eigenes CSS).
+    // Theme, Icons und CSS in Schichten: Kern < App < ~/.config/tubequ/style.css (TubeQu hat kein eigenes CSS).
     qu_core::style::install(&display, "");
 
     let player = Rc::new(player::new());
@@ -143,7 +146,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
                 nav.watch.widget.remove_css_class("page-in-a");
                 nav.watch.widget.remove_css_class("page-in-b");
             }
-            // Fenstertitel = Videotitel (Alt-Tab, Fensterliste); „Tubequ“ bleibt hinten dran.
+            // Fenstertitel = Videotitel (Alt-Tab, Fensterliste); „TubeQu“ bleibt hinten dran.
             if !v.title.is_empty() {
                 nav.window.set_title(Some(&format!("{} – {}", v.title, qu_core::config().app.title)));
             }

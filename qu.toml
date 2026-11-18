@@ -1,8 +1,8 @@
-# Tubequ – App-Konfiguration für qu-core (beim Bauen eingebettet). Beschreibung der Felder: ~/Work/quCore/CLAUDE.md
+# TubeQu – App-Konfiguration für qu-core (beim Bauen eingebettet). Beschreibung der Felder: ~/Work/quCore/CLAUDE.md
 
 [app]
 name = "tubequ"
-title = "Tubequ"
+title = "TubeQu"
 id = "dev.tubequ.Tubequ"
 # Startmenü-Eintrag (`tubequ --install`)
 generic_name = "YouTube client"

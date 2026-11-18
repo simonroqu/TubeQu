@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Tubequ link router
-Comment=Opens YouTube links in Tubequ, everything else in the default browser
+Name=TubeQu link router
+Comment=Opens YouTube links in TubeQu, everything else in the default browser
 Exec=@LINKS@ %U
 Terminal=false
 NoDisplay=true

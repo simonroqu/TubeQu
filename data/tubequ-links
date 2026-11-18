@@ -1,5 +1,5 @@
 #!/bin/sh
-# Weiche für Links aus anderen Apps (Discord, Terminal …): YouTube-Videos und -Kanäle öffnet Tubequ,
+# Weiche für Links aus anderen Apps (Discord, Terminal …): YouTube-Videos und -Kanäle öffnet TubeQu,
 # alles andere geht wie bisher über omarchy-launch-browser an den Standard-Browser.
 # Eingetragen von install.sh in ~/.config/hyprland-mimeapps.list, nur für https: Omarchy bestimmt den
 # Browser über den http-Eintrag, der bleibt unverändert (Super+B usw. unberührt).
