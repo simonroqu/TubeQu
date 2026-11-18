@@ -12,7 +12,12 @@ keywords = ["youtube", "video", "stream", "live"]
 # Menü oben links. Eingebaut: back, home, search, busy, menu (Burger).
 [nav]
 top = ["menu", "back", "home", "search", "busy"]
-menu = ["later", "history", "tv", "account"]
+menu = ["subs", "later", "history", "tv", "account"]
+
+[[nav.item]]
+id = "subs"
+icon = "subscribed"
+tooltip = "Subscriptions"
 
 [[nav.item]]
 id = "later"

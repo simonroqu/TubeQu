@@ -213,7 +213,7 @@ pub async fn suggestions(query: String) -> Vec<String> {
 pub async fn more(m: More) -> Result<Page, String> {
     match m {
         More::YtDlp(target, start) => ytdlp_page(target, start).await,
-        More::Feed(token) => feed_page(Some(token)).await,
+        More::Feed(token) => feed_page("", Some(token)).await,
         More::Yt(p) => {
             throttle().await?;
             let next = p.next(RP.query()).await.map_err(|e| e.to_string())?;
@@ -570,7 +570,7 @@ pub fn video_from_json(j: &serde_json::Value) -> Option<Video> {
 pub async fn home() -> Result<Page, String> {
     let page = if COOKIES.is_none() && crate::pair::stored().is_some() {
         // Fernseher/Handy: kein yt-dlp, aber Login vom Desktop → dieselbe Startseite wie auf youtube.com.
-        match feed_page(None).await {
+        match feed_page("FEwhat_to_watch", None).await {
             Ok(p) if !p.videos.is_empty() => Ok(p),
             Ok(_) => own_recommendations().await,
             Err(e) => {
@@ -596,10 +596,22 @@ pub async fn home() -> Result<Page, String> {
     page
 }
 
-/// YouTube-Startseite über innertube mit dem Login vom Desktop (`pair`): 1 Anfrage pro Seite.
-/// `None` = erste Seite, sonst Fortsetzungs-Token der vorigen.
-async fn feed_page(token: Option<String>) -> Result<Page, String> {
-    let key = format!("feed:{}:{}", account(), token.as_deref().unwrap_or(""));
+/// Abos: neueste Videos der abonnierten Kanäle, neueste zuerst (YouTubes Abo-Feed ist chronologisch). Nur mit Login,
+/// 1 Anfrage pro Seite wie die Startseite.
+pub async fn subscriptions() -> Result<Page, String> {
+    if COOKIES.is_some() {
+        ytdlp_page(":ytsubs".into(), 0).await
+    } else if crate::pair::stored().is_some() {
+        feed_page("FEsubscriptions", None).await
+    } else {
+        Err("Sign in to see your subscriptions".into())
+    }
+}
+
+/// YouTube-Feed über innertube mit dem Login vom Desktop (`pair`): 1 Anfrage pro Seite.
+/// `browse` = Feed der ersten Seite (`FEwhat_to_watch`, `FEsubscriptions`), sonst Fortsetzungs-Token der vorigen.
+async fn feed_page(browse: &str, token: Option<String>) -> Result<Page, String> {
+    let key = format!("feed:{}:{browse}:{}", account(), token.as_deref().unwrap_or(""));
     if let Some(p) = cached(&key) {
         return Ok(p);
     }
@@ -607,16 +619,24 @@ async fn feed_page(token: Option<String>) -> Result<Page, String> {
     let mut body = serde_json::json!({ "context": innertube_context() });
     match token {
         Some(t) => body["continuation"] = t.into(),
-        None => body["browseId"] = "FEwhat_to_watch".into(),
+        None => body["browseId"] = browse.into(),
     }
     let text = innertube(&cookies, account(), "browse", &body).await?;
     let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    // Abgelaufener/abgelehnter Login: YouTube antwortet trotzdem (Abos dann leer) → als Fehler melden.
+    if logged_out(&json) {
+        return Err("Signed out: YouTube no longer accepts this sign-in. Sign in on TV again.".into());
+    }
     let page = parse_feed(&json);
     store(key, &page);
     Ok(page)
 }
 
-/// Startseiten-Antwort (erste Seite oder Fortsetzung) → Videos + Token. Werbung (`adSlotRenderer`) und das
+fn logged_out(json: &serde_json::Value) -> bool {
+    json.pointer("/responseContext/mainAppWebResponseContext/loggedOut") == Some(&serde_json::Value::Bool(true))
+}
+
+/// Feed-Antwort (Startseite/Abos, erste Seite oder Fortsetzung) → Videos + Token. Werbung (`adSlotRenderer`) und das
 /// Shorts-Regal (`richSectionRenderer`) fallen weg, weil nur direkte `lockupViewModel` zählen.
 fn parse_feed(json: &serde_json::Value) -> Page {
     let first = json.pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/richGridRenderer/contents");
@@ -715,7 +735,7 @@ pub fn saved_home() -> Option<Page> {
     (!videos.is_empty()).then_some(Page { videos, next: None })
 }
 
-/// Eine Seite aus einer yt-dlp-Liste mit Browser-Login (`:ytrec` = Startseite, `ytsearchall:…` = Suche).
+/// Eine Seite aus einer yt-dlp-Liste mit Browser-Login (`:ytrec` = Startseite, `:ytsubs` = Abos, `ytsearchall:…` = Suche).
 /// yt-dlp blättert für Seite k intern ab Anfang (k Abrufe in einem Aufruf): darum zählen sie als k Anfragen.
 /// ponytail: tiefes Nachladen wird dadurch langsamer (2 s je Seite); eigene Fortsetzungs-Token, falls das stört.
 async fn ytdlp_page(target: String, start: usize) -> Result<Page, String> {
@@ -1154,7 +1174,13 @@ async fn innertube(cookies: &[(String, String)], account: u32, endpoint: &str, b
     if !status.is_success() {
         return Err(format!("YouTube refused ({status})"));
     }
-    res.text().await.map_err(|e| e.to_string())
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    // Fernseher/Handy: lehnt YouTube den übertragenen Login ab, direkt abmelden (neu per „Sign in on TV“).
+    // Der Browser-Login am Desktop bleibt unberührt (dort gibt es kein `pair`-Login).
+    if text.contains("\"loggedOut\":true") && crate::pair::stored().is_some() {
+        crate::pair::forget();
+    }
+    Ok(text)
 }
 
 const YT_ORIGIN: &str = "https://www.youtube.com";
@@ -1405,5 +1431,8 @@ mod feed_tests {
         assert_eq!(super::parse_duration("LIVE"), None);
         assert_eq!(super::parse_views("1.2M views"), Some(1_200_000));
         assert_eq!(super::parse_views("1 view"), Some(1));
+        assert!(!super::logged_out(&json));
+        assert!(super::logged_out(&serde_json::json!({"responseContext": {"mainAppWebResponseContext": {"loggedOut": true}}})));
     }
 }
+

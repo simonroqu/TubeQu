@@ -140,6 +140,12 @@ pub async fn home() -> Result<Page, TubeError> {
     Ok(page(qu_core::bg(youtube::home()).await?))
 }
 
+/// Abos: neueste Videos der abonnierten Kanäle (nur angemeldet).
+#[uniffi::export]
+pub async fn subscriptions() -> Result<Page, TubeError> {
+    Ok(page(qu_core::bg(youtube::subscriptions()).await?))
+}
+
 /// Letzte Startseite (sofort, ohne Netz).
 #[uniffi::export]
 pub fn saved_home() -> Option<Page> {
@@ -285,9 +291,10 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-/// Auf den Login vom Desktop warten (keine Anfrage an YouTube).
+/// Auf den Login vom Desktop warten (keine Anfrage an YouTube). `secret` = angezeigter Code; `None` = nur vom fest
+/// gekoppelten Desktop (läuft, solange die App offen ist; ohne Kopplung sofort Fehler).
 #[uniffi::export]
-pub async fn pair_receive(secret: String) -> Result<Account, TubeError> {
+pub async fn pair_receive(secret: Option<String>) -> Result<Account, TubeError> {
     let mut task = AbortOnDrop(qu_core::RT.spawn(tubequ_core::pair::receive(secret)));
     let login = (&mut task.0).await.map_err(|e| e.to_string())??;
     Ok(account_of(login))

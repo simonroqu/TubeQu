@@ -6,6 +6,8 @@ license = "GPL-3.0-or-later"
 description = "TubeQu ohne Oberfläche: YouTube (rustypipe, yt-dlp), Fortschritt, Listen, SponsorBlock (für die GTK-App und Android)"
 
 [dependencies]
+chacha20poly1305 = "0.10"
+getrandom = "0.3"
 if-addrs = "0.15.0"
 qu-core = { git = "https://github.com/simonroqu/quCore", default-features = false }
 # TLS: Desktop wie bisher (System), Android mit rustls (OpenSSL lässt sich dort schlecht bauen).
@@ -14,6 +16,7 @@ rustypipe = { version = "0.11", default-features = false }
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
+spake2 = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "fs", "process", "net", "io-util"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]

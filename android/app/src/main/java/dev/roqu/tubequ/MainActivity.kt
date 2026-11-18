@@ -80,6 +80,7 @@ object Http : Downloader() {
 sealed interface Screen {
     data object Home : Screen
     data class Results(val query: String) : Screen
+    data object Subs : Screen
     data object Later : Screen
     data object History : Screen
     data object Account : Screen
@@ -98,6 +99,16 @@ fun bare(id: String) = Clip(id, "", "", null, null, false, null, null, null)
 @Composable
 fun App(link: String?) {
     val nav = remember { Nav<Screen>(Screen.Home) }
+    // Fest gekoppelter Desktop schickt neue Cookies ohne Code („Sign in on TV“ dort): warten, solange die App läuft,
+    // außer auf der Konto-Seite (die wartet selbst, auf Code oder Schlüssel). Ohne Kopplung endet die Schleife sofort.
+    var logins by remember { mutableIntStateOf(0) }
+    val onAccount = nav.page is Screen.Account
+    LaunchedEffect(onAccount) {
+        if (onAccount) return@LaunchedEffect
+        while (true) {
+            try { pairReceive(null); logins++ } catch (e: Exception) { break }
+        }
+    }
     LaunchedEffect(link) {
         val id = link?.let { videoId(it) } ?: return@LaunchedEffect
         nav.open(Screen.Watch(bare(id)))
@@ -108,17 +119,19 @@ fun App(link: String?) {
         searches = ::searches,
         onSearch = { addSearch(it); nav.open(Screen.Results(it)) },
         bubble = { it !is Screen.Watch },
-        // Wie die Burger-Spalte am Desktop (`[nav] menu`: later, history); das Konto gibt es auf Android nicht.
+        // Wie die Burger-Spalte am Desktop (`[nav] menu`: subs, later, history, Konto).
         buttons = {
+            IconButton(QuIcons.subscribed, "Subscriptions") { nav.open(Screen.Subs) }
             IconButton(QuIcons.later, "Watch later") { nav.open(Screen.Later) }
             IconButton(QuIcons.history, "History") { nav.open(Screen.History) }
-            AccountButton(nav.reload) { nav.open(Screen.Account) }
+            AccountButton(nav.reload + logins) { nav.open(Screen.Account) }
         },
     ) { page ->
         val play = { v: Clip -> nav.open(Screen.Watch(v)) }
         when (page) {
             Screen.Home -> HomePage(play, forced = remember { nav.takeReload() })
             is Screen.Results -> FeedPage(page.query, { search(page.query) }, play)
+            Screen.Subs -> FeedPage("Subscriptions", { subscriptions() }, play)
             Screen.Later -> ListPage("Watch later", later(), "Nothing saved yet", play)
             Screen.History -> ListPage("History", history(), "Nothing watched yet", play)
             // An- oder abgemeldet: Startseite neu laden (wie der Kontowechsel am Desktop).
@@ -179,7 +192,7 @@ fun AccountPage(changed: () -> Unit) {
             androidx.compose.material3.Text("Sign in with your computer", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Fg)
             androidx.compose.material3.Text("On your computer, open TubeQu, choose the TV icon in the menu (Sign in on TV) and enter this code:", color = Dim)
             androidx.compose.material3.Text(code?.display ?: "…", fontSize = 56.sp, fontWeight = FontWeight.Bold, color = Accent)
-            androidx.compose.material3.Text("Both devices must be on the same network. The code works only while this page is open.", color = Dim, fontSize = 13.sp)
+            androidx.compose.material3.Text("Both devices must be on the same network. The code works only while this page is open. Afterwards, Sign in on TV on your computer updates this TV directly while TubeQu is open here.", color = Dim, fontSize = 13.sp)
             error?.let { androidx.compose.material3.Text(it, color = Red) }
         }
     }

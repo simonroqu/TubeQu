@@ -67,7 +67,15 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
   `accounts.tsv`, **keine** YouTube-Anfrage) → `pair::send` sucht den Fernseher in allen eigenen IPv4-Netzen (erste drei
   Stellen + IP-Endung, ausgehende Verbindung, darum kein Firewall-Problem) und schickt eine JSON-Zeile. Fernseher prüft die
   8 Ziffern (Vergleich ohne frühen Abbruch), speichert `login.json` (App-privat), setzt das Konto, schließt den Port; nach
-  3 falschen Codes oder Verlassen der Seite (`AbortOnDrop` in `ffi`) ebenfalls zu. Unverschlüsselt im Heimnetz (bewusst).
+  3 falschen Codes oder Verlassen der Seite (`AbortOnDrop` in `ffi`) ebenfalls zu.
+  **Verschlüsselt** (seit 2026-11-18, die Cookies sind der ganze Google-Login): aus den 8 Ziffern per SPAKE2 (`spake2`)
+  ein 256-Bit-Schlüssel (Mitlesen erlaubt kein Offline-Durchprobieren), Login mit ChaCha20-Poly1305 (`chacha20poly1305`),
+  Zufall über `getrandom`; alles reines Rust, läuft auf Linux/macOS/Windows/Android. Ablauf in `pair.rs` oben.
+  **Feste Kopplung**: der ausgehandelte Schlüssel bleibt gespeichert (TV `pair.key`, bleibt beim Abmelden; Desktop
+  `tvs.tsv` = IP + Schlüssel, Einträge der unverschlüsselten Vorversion gelten nicht). Danach schickt „Sign in on TV“ am Desktop direkt (`send_paired`, frische
+  Cookies, kein Code); klappt das nicht (TV-App zu, neue IP), öffnet sich die Code-Eingabe. Die TV-App wartet dafür,
+  solange sie läuft, außer auf der Konto-Seite (`receive(None)` in `App`, nur mit dem Schlüssel Verschlüsseltes; `bind` wartet
+  kurz, bis der Port der anderen Seite frei ist).
   Angemeldet: `logged_in()`/`browser_cookies()` nehmen den übertragenen Login → YouTube-Verlauf beim Abspielen
   (`mark_watched`, 1 Anfrage) und Position beim Verlassen (Ping). „Sign out“ löscht `login.json`. Abspielen bleibt anonym.
   Getestet 2026-11-18: Code in Waydroid, Dummy-Login vom Desktop → angemeldet, zweiter Versuch findet den Port zu,
@@ -76,7 +84,14 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
   übertragenen Login (`feed_page`/`parse_feed`, 1 Anfrage pro Seite, Nachladen über Fortsetzungs-Token `More::Feed`);
   Werbung und Shorts-Regal fallen weg, bei Fehler eigene Empfehlungen. Testdatei `core/testdata/home_feed.json`
   (echte Antwort 2026-11-18, gekürzt) – ändert YouTube das Format, dort neu abgleichen.
-  Noch nicht: Abo-Feed/YouTube-Verlauf/„Watch later“ von YouTube anzeigen (rustypipe-Feature `userdata` könnte das).
+  **Abos** (Bubble-Knopf, wie Desktop) = innertube `browse` `FEsubscriptions` über denselben `feed_page`/`parse_feed`
+  (geprüft 2026-11-18: gleiche Struktur, `lockupViewModel` + Shelves, 100 Videos/Seite). Ohne Login: Fehlertext.
+  Lehnt YouTube den übertragenen Login ab (abgelaufene Cookies), antwortet es trotzdem mit `loggedOut: true` und
+  leerem Abo-Feed → `logged_out` macht daraus einen Fehler („Sign in on TV again“), Startseite fällt auf eigene zurück.
+  `innertube()` meldet dann sofort ab (`pair::forget`, bei jeder Login-Anfrage geprüft). Ursache laut yt-dlp-Doku: Google
+  erneuert die Konto-Cookies in offenen YouTube-Tabs regelmäßig, kopierte Cookies verfallen dann (nicht an PC-Neustart
+  gebunden). Privates Fenster hilft hier nicht: `login_for_tv` liest die Cookies aus dem Browserprofil.
+  Noch nicht: YouTube-Verlauf/„Watch later“ von YouTube anzeigen.
 - Startseite neu laden (wie Desktop): Home-Knopf auf der Startseite und nach An-/Abmelden (`Nav.reloadHome`, einmalig über
   `takeReload`, leert vorher den Cache = bis 3 Anfragen). Zurückkommen lädt nicht neu.
 - Achtung Anfragen: Start der App lädt die Startseite neu, wenn `home.jsonl` älter als 10 min ist (eigene Empfehlungen =
@@ -121,6 +136,7 @@ Muster: Netzwerk nie im GTK-Thread. `glib::spawn_future_local(async { bg(fut).aw
 | Abspielen (Android) | NewPipeExtractor (Kotlin), anonym, vorher `throttle()` | siehe Abschnitt Android |
 | Abspielen | mpv → ytdl_hook → yt-dlp; zuerst anonym `player_client=visionos` (`ANON_YTDL_OPTIONS`, schnell); scheitert das (Bot-Sperre, Alter, 403), Zweitversuch mit Browser-Login **Cookies + Konto + PO-Token**, `player_client=web_safari` (HLS; `login_ytdl_options`) | Format über `ytdl-format`, Qualität in `~/.config/tubequ/quality`. Standard-Clients von yt-dlp 2026.10.26 (`tv_samsung`, `visionos`, `web`): `tv_samsung`-Streams (`c=TVHTML5`) bekommen seit 2026-11-16 unregelmäßig 403 → „Couldn't load video“ |
 | Als gesehen melden | `youtubei/v1/player` per `innertube` (Cookies, Konto) → `playbackTracking`; Ping an `videostatsPlaybackUrl` (Verlauf), bei Pause/Videowechsel/Stopp Ping an `videostatsWatchtimeUrl` mit echter Position (`cmt`, `st=0`, `et=pos`) | 1 Anfrage über `throttle()`; Pings an s.youtube.com ungedrosselt. **Nicht** `yt-dlp --mark-watched`: meldet immer `len-1` → Video bei YouTube ganz gesehen. Abspielen selbst bleibt ohne Login |
+| Abos (Burger-Spalte „Subscriptions“) | `yt-dlp --cookies-from-browser … :ytsubs` (`youtube::subscriptions`); Android angemeldet: innertube `FEsubscriptions` | Neueste zuerst = Reihenfolge von YouTube, nicht nachsortiert; 1 Anfrage pro 30 Videos, ohne Login nur Fehlertext |
 | Thumbnails/Avatare | `i.ytimg.com` / yt3 per reqwest, Cache `~/.cache/tubequ/thumbs` | zählt nicht zum Limit, max. 6 parallel |
 | SponsorBlock | sponsor.ajay.app | zählt nicht zum Limit |
 | Abonnieren/Deabonnieren | `youtubei/v1/subscription/(un)subscribe` per reqwest (`youtube::innertube`), Cookies via `yt-dlp --cookies-from-browser … --cookies <tmp>` (ohne URL: bricht ab, schreibt die Datei aber, kein Netz), Header `SAPISIDHASH`/`SAPISID1PHASH`/`SAPISID3PHASH` | 1 Anfrage über `throttle()`. Erfolg nur, wenn die Antwort `"subscribed":true/false` enthält (HTTP 200 allein heißt nichts). Abo-Zustand wird **nicht** abgefragt (wäre 1 Anfrage pro Kanalbesuch), nur in der Sitzung pro Konto gemerkt |
@@ -294,7 +310,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
   die Link-Weiche es nicht zurück in TubeQu schickt), Mittelklick = Watch later. Fertig Geschautes
   abgedunkelt. Scroll-Position bleibt beim Zurückkommen erhalten.
 - Menü per Tastatur: Esc klappt es auf – auf der Startseite (kein Zurück-Verlauf) und beim Video (im Vollbild verlässt Esc zuerst das Vollbild); sonst bleibt Esc „Zurück“. Pfeil hoch/runter in der Spalte (Watch later, History, Konto; Umlauf), rechts in die obere Reihe (Zurück, Home, Suche), dort links/rechts, links am Anfang bzw. runter zurück in die Spalte; Enter/Leertaste drückt, Esc klappt zu (`menu_key` in `main.rs`). Knöpfe nur dann fokussierbar; `set_focus_visible(true)` zeigt die Markierung (style.css `.bubble button:focus-visible`). Offenes Menü hält die Navigation im Player sichtbar (auch wenn die Leiste weg ist).
-- Nav-Bubble: Burger, Zurück, Home, Suche, Lade-Kreis; Burger klappt die Bubble nach unten auf (Watch later, Verlauf, Sign in on TV, Konto), Auswahl oder Klick daneben klappt zu. Kein Reload-Knopf. Klick auf den Knopf der Seite, auf der man ist, lädt sie neu.
+- Nav-Bubble: Burger, Zurück, Home, Suche, Lade-Kreis; Burger klappt die Bubble nach unten auf (Abos, Watch later, Verlauf, Sign in on TV, Konto), Auswahl oder Klick daneben klappt zu. Kein Reload-Knopf. Klick auf den Knopf der Seite, auf der man ist, lädt sie neu.
 - Lade-Kreis in der Bubble: `crate::Busy::new()` in jeden Ladevorgang mitnehmen (Raster, Nachladen, Video-Details, Konten, Abo); Reload lässt das Alte stehen, bis das Neue da ist.
 - Ansehen-Seite: Infos unter dem Video erst sichtbar, wenn die Details da sind; bis dahin graue Platzhalter in derselben Form (Titel, Profilbild-Kreis, Kanal, Beschreibung) mit durchlaufendem Glanzstreifen (`watch.rs` `skeleton`, style.css `.skeleton`), nicht bei direkt abgespielten Adressen. Kanal-Profilbilder haben bis zum Laden einen grauen Kreis (`.avatar.placeholder`). Suchfeld zeigt beim Öffnen die letzte Suche (markiert); leer oder unverändert = Liste der letzten Suchen, keine Vorschlags-Anfrage.
 - Weiches Scrollen mit dem Mausrad (`smooth.rs`, an jedem ScrolledWindow): Raststufen gleiten statt zu springen; Touchpad bleibt bei GTK.
@@ -316,6 +332,7 @@ Diagnose-Hinweis: `curl` auf Stream-URLs kann bei eingeloggten Abrufen fälschli
 - `~/.config/tubequ/volume` – Lautstärke 0–200 (Standard 100 = Regler in der Mitte, `MAX_VOLUME`, mpv `volume-max`), bei jeder Änderung gespeichert
 - `~/.config/tubequ/player-width` / `columns` – mit Strg+Mausrad gewählte Player-Breite / Spaltenzahl
 - `~/.config/tubequ/account` – Nummer des Google-Kontos im Browser (Standard 0)
+- `~/.local/share/tubequ/tvs.tsv` – fest gekoppelte Fernseher (IP, Schlüssel); Android: `files/tubequ/pair.key`
 - `~/.cache/tubequ/home.jsonl` – letzte Startseite (sofort beim Start)
 - `~/.cache/tubequ/accounts.tsv` – bekannte Konten (Nummer, Name, E-Mail, Profilbild-URL)
 - Android: `files/tubequ/login.json` – vom Desktop übertragener Login (Cookies, Konto), nur in der App lesbar

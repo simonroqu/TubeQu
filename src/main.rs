@@ -48,6 +48,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     let search_button = navbar.button("search").clone();
     let history_button = navbar.button("history").clone();
     let later_button = navbar.button("later").clone();
+    let subs_button = navbar.button("subs").clone();
     let tv_button = navbar.button("tv").clone();
     // Konto (nur mit Browser-Login): Profilbild des aktiven Kontos unten in der Spalte. Klick klappt
     // daneben die übrigen Konten nach rechts auf (Bubble wird zum liegenden U).
@@ -230,7 +231,7 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
     });
     window.add_controller(side_buttons);
 
-    // Welche Liste das Raster zeigt ("home", "later", "history", sonst ""). Klick auf den Knopf der
+    // Welche Liste das Raster zeigt ("home", "subs", "later", "history", sonst ""). Klick auf den Knopf der
     // Seite, auf der man schon ist, lädt sie neu (gilt für jeden Seiten-Knopf in der Bubble).
     let section: Rc<std::cell::Cell<&'static str>> = Rc::default();
     let nav_to = {
@@ -254,6 +255,15 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         Box::new(move || {
             grid.set_home(true);
             grid.show_saved(youtube::saved_home(), youtube::home);
+        })
+    }));
+
+    // Abos: neueste Videos der abonnierten Kanäle (YouTube-Abo-Feed, 1 Anfrage pro 30 Videos).
+    subs_button.connect_clicked(nav_to("subs", {
+        let grid = grid.clone();
+        Box::new(move || {
+            grid.set_home(false);
+            grid.show(youtube::subscriptions);
         })
     }));
 
@@ -379,9 +389,30 @@ fn build(app: &gtk::Application) -> Rc<dyn Fn(Option<String>)> {
         }
     });
     root.add_overlay(&pairing.widget);
+    // Fest gekoppelter Fernseher: Login direkt schicken (frische Cookies, kein Code). Klappt das nicht
+    // (TV-App zu, neue IP), Code-Eingabe wie beim ersten Mal.
+    // ponytail: solange ein gekoppelter TV antwortet, kommt man nicht an die Code-Eingabe für einen zweiten.
     tv_button.connect_clicked({
-        let pairing = pairing.clone();
-        move |_| pairing.open()
+        let (pairing, grid, nav, section) = (pairing.clone(), grid.clone(), nav.clone(), section.clone());
+        move |_| {
+            if !tubequ_core::pair::paired() {
+                return pairing.open();
+            }
+            nav.home();
+            section.set("");
+            grid.set_home(false);
+            grid.note("Sending your sign-in to the TV…");
+            let (grid, pairing) = (grid.clone(), pairing.clone());
+            glib::spawn_future_local(async move {
+                match bg(async move { tubequ_core::pair::send_paired(youtube::login_for_tv().await?).await }).await {
+                    Ok(()) => grid.note("Signed in on your TV."),
+                    Err(e) => {
+                        grid.note(&e);
+                        pairing.open();
+                    }
+                }
+            });
+        }
     });
     search_button.connect_clicked({
         let search = search.clone();
