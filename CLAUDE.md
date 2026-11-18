@@ -73,6 +73,8 @@ Seiten-Fortsetzung bleibt in Rust: `Page.next` → `more(next)`), `android/app/.
   Getestet 2026-11-18: Code in Waydroid, Dummy-Login vom Desktop → angemeldet, zweiter Versuch findet den Port zu,
   Abmelden; echte Browser-Cookies am Desktop gefunden (nur gezählt, nicht gesendet).
   Noch nicht: Abo-Feed/YouTube-Verlauf/„Watch later“ von YouTube anzeigen (rustypipe-Feature `userdata` könnte das).
+- Startseite neu laden (wie Desktop): Home-Knopf auf der Startseite und nach An-/Abmelden (`Nav.reloadHome`, einmalig über
+  `takeReload`, leert vorher den Cache = bis 3 Anfragen). Zurückkommen lädt nicht neu.
 - Achtung Anfragen: Start der App lädt die Startseite neu, wenn `home.jsonl` älter als 10 min ist (eigene Empfehlungen =
   bis 3 Anfragen) – bei Tests mit mehreren Neustarts mitzählen.
 - Kanal auf Android über rustypipe (`channel_rp`, ohne Dauer/Aufrufe/Datum), aber noch **keine Kanalseite** in der App.

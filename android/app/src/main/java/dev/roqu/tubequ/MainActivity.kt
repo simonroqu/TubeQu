@@ -112,16 +112,17 @@ fun App(link: String?) {
         buttons = {
             IconButton(QuIcons.later, "Watch later") { nav.open(Screen.Later) }
             IconButton(QuIcons.history, "History") { nav.open(Screen.History) }
-            AccountButton { nav.open(Screen.Account) }
+            AccountButton(nav.reload) { nav.open(Screen.Account) }
         },
     ) { page ->
         val play = { v: Clip -> nav.open(Screen.Watch(v)) }
         when (page) {
-            Screen.Home -> HomePage(play)
+            Screen.Home -> HomePage(play, forced = remember { nav.takeReload() })
             is Screen.Results -> FeedPage(page.query, { search(page.query) }, play)
             Screen.Later -> ListPage("Watch later", later(), "Nothing saved yet", play)
             Screen.History -> ListPage("History", history(), "Nothing watched yet", play)
-            Screen.Account -> AccountPage { nav.back() }
+            // An- oder abgemeldet: Startseite neu laden (wie der Kontowechsel am Desktop).
+            Screen.Account -> AccountPage { nav.reloadHome() }
             is Screen.Watch -> WatchPage(page.video)
         }
     }
@@ -129,8 +130,9 @@ fun App(link: String?) {
 
 /** Konto in der Bubble: Profilbild, wenn angemeldet (wie am Desktop), sonst das Konto-Symbol. */
 @Composable
-fun AccountButton(open: () -> Unit) {
-    val photo = remember { signedIn()?.photo }
+fun AccountButton(reload: Int, open: () -> Unit) {
+    // Nach An-/Abmelden (lädt die Startseite neu) das Bild neu lesen.
+    val photo = remember(reload) { signedIn()?.photo }
     if (photo == null) IconButton(QuIcons.account, "Sign in", onClick = open)
     else androidx.compose.foundation.layout.Box(
         androidx.compose.ui.Modifier.size(40.dp).clip(androidx.compose.foundation.shape.CircleShape)
@@ -147,7 +149,7 @@ fun AccountButton(open: () -> Unit) {
  * seinen Browser-Login übers Heimnetz (tubequ-core `pair`). Angemeldet: Konto und „Sign out“.
  */
 @Composable
-fun AccountPage(done: () -> Unit) {
+fun AccountPage(changed: () -> Unit) {
     var account by remember { mutableStateOf(signedIn()) }
     var code by remember { mutableStateOf<PairCode?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -157,6 +159,7 @@ fun AccountPage(done: () -> Unit) {
             val c = pairCode()
             code = c
             account = pairReceive(c.secret)
+            changed()
         } catch (e: Exception) { error = message(e) }
     }
     androidx.compose.foundation.layout.Column(
@@ -168,7 +171,7 @@ fun AccountPage(done: () -> Unit) {
             androidx.compose.material3.Text(a.name.ifEmpty { "Signed in" }, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Fg)
             if (a.email.isNotEmpty()) androidx.compose.material3.Text(a.email, color = Dim)
             androidx.compose.material3.Text("Your YouTube history and subscriptions use this account. Videos still play without it.", color = Dim)
-            androidx.compose.material3.TextButton(onClick = { signOut(); account = null; done() },
+            androidx.compose.material3.TextButton(onClick = { signOut(); changed() },
                 modifier = androidx.compose.ui.Modifier.tvFocus(androidx.compose.foundation.shape.RoundedCornerShape(50))) {
                 androidx.compose.material3.Text("Sign out", color = Fg)
             }
@@ -229,13 +232,15 @@ fun Feed(title: String?, first: Page?, error: String?, shelf: List<Card>, play: 
 }
 
 @Composable
-fun HomePage(play: (Clip) -> Unit) {
-    // Sofort die letzte Startseite; neu holen erst, wenn sie älter als 10 min ist (spart Anfragen, wie am Desktop).
+fun HomePage(play: (Clip) -> Unit, forced: Boolean) {
+    // Sofort die letzte Startseite; neu holen erst, wenn sie älter als 10 min ist (spart Anfragen, wie am Desktop) –
+    // außer bei `forced` (Home erneut gedrückt, an-/abgemeldet): dann frisch, die alte bleibt stehen, bis die neue da ist.
     var page by remember { mutableStateOf(savedHome()) }
     var error by remember { mutableStateOf<String?>(null) }
     val shelf = remember { continueWatching(SHELF_MAX) }
     LaunchedEffect(Unit) {
-        if (page != null && savedHomeFresh()) return@LaunchedEffect
+        if (!forced && page != null && savedHomeFresh()) return@LaunchedEffect
+        if (forced) forgetCache()
         try { page = home() } catch (e: Exception) { if (page == null) error = message(e) }
     }
     Feed(null, page, error, shelf, play)

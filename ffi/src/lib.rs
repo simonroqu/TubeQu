@@ -304,3 +304,9 @@ pub async fn mark_watched(id: String) {
 pub async fn report_position(id: String, pos: f64) {
     let _ = qu_core::bg(youtube::report_position(id, pos)).await;
 }
+
+/// Seiten-Cache leeren (vor einem Neuladen, wie am Desktop): sonst kämen 10 min lang dieselben Ergebnisse.
+#[uniffi::export]
+pub fn forget_cache() {
+    youtube::forget_cache();
+}
