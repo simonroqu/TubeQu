@@ -1,0 +1,4 @@
+# Lokale Entwicklung: qu-core aus ../quCore (neben diesem Projekt) statt aus GitHub.
+# Ohne ../quCore schlägt der Build fehl; dann quCore daneben klonen oder diese Datei entfernen.
+[patch."https://github.com/simonroqu/quCore"]
+qu-core = { path = "../quCore" }
