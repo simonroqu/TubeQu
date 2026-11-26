@@ -1,6 +1,6 @@
 //! Player-Anbindung: der Player aus qu-core mit TubeQu-Daten – yt-dlp, Fortschritt pro Video (fertig → aus
 //! „Watch later“), Position an YouTube melden, SponsorBlock (automatisch übersprungen), Tempo pro Kanal,
-//! zweiter Versuch mit Browser-Login bei Altersbeschränkung.
+//! zweiter Versuch mit Browser-Login (nach einem Fehlschlag 30 min lang Login zuerst).
 
 use crate::progress;
 use crate::youtube::Video;
@@ -9,7 +9,8 @@ use qu_core::segments::Segment;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub use qu_core::player::toast;
 pub type Player = qu_core::player::Player<Video>;
@@ -29,6 +30,33 @@ fn with_raw(opts: &str, extra: &str) -> String {
     let raw = format!("{SUBS_RAW},{extra}");
     let raw = format!("ytdl-raw-options=%{}%{raw}", raw.len());
     if opts.is_empty() { raw } else { format!("{opts},{raw}") }
+}
+
+/// Wann zuletzt ein anonymer Abruf scheiterte. Die Bot-Sperre gilt für die IP und hält an: solange lädt TubeQu gleich
+/// mit Login – spart den sicheren Fehlversuch, 1,5 s Wartezeit und 1 Anfrage.
+/// ponytail: 30 min fest, auch nach einem Einzelfall (altersbeschränkt, kurzer 403); bei Bedarf nach Fehlertext trennen.
+static ANON_FAILED: Mutex<Option<Instant>> = Mutex::new(None);
+const LOGIN_FIRST_FOR: Duration = Duration::from_secs(30 * 60);
+
+/// `loadfile`-Teil für Abspielen mit Login (`None` = kein Browser-Login).
+fn login_raw() -> Option<String> {
+    Some(with_raw("", &crate::youtube::login_ytdl_options()?))
+}
+
+fn login_first() -> bool {
+    ANON_FAILED.lock().unwrap().is_some_and(|t| t.elapsed() < LOGIN_FIRST_FOR)
+}
+
+/// Optionen für den Zweitversuch: anonym gescheitert → mit Login; mit Login gescheitert (z. B. Cookies abgelaufen)
+/// → anonym (Login-Teil heraus, dann gilt wieder `ANON_YTDL_OPTIONS`).
+fn retry_with(opts: &str, login: &str) -> String {
+    if opts.contains(login) {
+        *ANON_FAILED.lock().unwrap() = None;
+        opts.replace(login, "").split(',').filter(|o| !o.is_empty()).collect::<Vec<_>>().join(",")
+    } else {
+        *ANON_FAILED.lock().unwrap() = Some(Instant::now());
+        if opts.is_empty() { login.to_string() } else { format!("{opts},{login}") }
+    }
 }
 
 struct TubeHooks;
@@ -91,7 +119,7 @@ impl Hooks<Video> for TubeHooks {
     /// Anonym gescheitert (Bot-Sperre der IP, altersbeschränkt, 403 …): der eine zweite Versuch läuft mit Browser-Login
     /// + PO-Token. Ohne Login gibt es keine Alternative, dann einfach nochmal dasselbe.
     fn retry_opts(&self, _log: &[String], opts: &str) -> Option<String> {
-        Some(with_raw(opts, &crate::youtube::login_ytdl_options()?))
+        Some(retry_with(opts, &login_raw()?))
     }
 }
 
@@ -117,7 +145,8 @@ pub fn play(player: &Player, video: Option<Video>, url: &str, live: bool) {
     let start = video.as_ref().filter(|_| !live).and_then(|v| progress::resume_at(&v.id));
     let speed = video.as_ref().and_then(|v| v.channel_id.as_deref()).map_or(1.0, crate::lists::channel_speed);
     let id = video.as_ref().map(|v| v.id.clone());
-    player.play(Media { start, speed, live, poster: video.is_some(), ..Media::link(video, url) });
+    let opts = login_raw().filter(|_| login_first()).into_iter().collect();
+    player.play(Media { start, speed, live, poster: video.is_some(), opts, ..Media::link(video, url) });
     // ponytail: kein ID-Abgleich – kommt das Bild eines vorigen Videos verspätet an, steht es kurz da.
     // Unkritisch, die Bilder liegen meist schon im Cache (Raster).
     if let Some(id) = id {
@@ -143,4 +172,20 @@ pub fn reload(player: &Rc<Player>) {
             Err(e) => player.show_error(&e),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_retry_flips() {
+        let login = with_raw("", "cookies-from-browser=firefox:/p");
+        let first = retry_with("start=12.0", &login);
+        assert_eq!(first, format!("start=12.0,{login}"));
+        assert!(login_first(), "anonym gescheitert: nächstes Video gleich mit Login");
+        assert_eq!(retry_with(&format!("{login},start=12.0"), &login), "start=12.0");
+        assert!(!login_first(), "Login gescheitert: wieder anonym zuerst");
+        assert_eq!(retry_with(&login, &login), "");
+    }
 }

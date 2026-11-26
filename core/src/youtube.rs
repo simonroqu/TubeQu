@@ -950,7 +950,9 @@ pub fn login_ytdl_options() -> Option<String> {
     // ponytail: player_client=web_safari (HLS) – yt-dlps Standard mit Login (2026.10.26) ist `web_embedded`, für den
     // yt-dlp keinen PO-Token anfordert → 403 (getestet 2026-11-18). web_safari bekommt den PO-Token vom Plugin
     // `yt-dlp-get-pot-rustypipe` + `rustypipe-botguard` (extra-deps.sh).
-    Some(format!("cookies-from-browser={c},add-header={},extractor-args=youtube:player_client=web_safari", account_header()))
+    // no-check-formats: Videos < 2 Tage lädt yt-dlp sonst zur Probe und wartet dabei die Vorab-Werbung ab
+    // („Sleeping 6.00 seconds as required by the site“). mpv spielt sie ohne Warten (getestet 2026-11-18).
+    Some(format!("cookies-from-browser={c},add-header={},extractor-args=youtube:player_client=web_safari,no-check-formats=", account_header()))
 }
 
 /// Anonym abspielen (erster Versuch; mit Login nur im Zweitversuch, siehe `player.rs` `retry_opts`).

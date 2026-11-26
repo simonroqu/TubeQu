@@ -163,6 +163,14 @@ Bekannte Lücken (nicht nochmal „neu entdecken“):
   `web_safari` sein: yt-dlps Standard mit Login ist `web_embedded`, dafür fordert yt-dlp keinen Token an → 403 (getestet).
   Der eine Zweitversuch (`retry_opts`, `with_raw`, mpv-Schreibweise `%n%wert`) nimmt den Login, wenn der anonyme Abruf
   scheitert (auch altersbeschränkte Videos); kostet dann 1 Anfrage mehr.
+  Danach lädt jedes Video **30 min lang gleich mit Login** (`ANON_FAILED`/`login_first` in `player.rs`): spart den
+  sicheren Fehlversuch, 1,5 s Wartezeit und 1 Anfrage (vom Nutzer bemerkt: ~5 s). Scheitert der Login-Versuch, geht der
+  Zweitversuch anonym und es gilt wieder „anonym zuerst“. Cookies auslesen kostet nur ~0,35 s (gemessen), der Rest ist
+  Webseite + JS-Aufgabe + PO-Token.
+  Gemessen 2026-11-18: Login-Weg braucht in yt-dlp ~4,6 s bis mpv startet (Webseite, Client-Config, Player-API, base.js,
+  node-Lösung; yt-dlp cacht das vorbereitete Player-JS bei keiner JS-Laufzeit). Dazu kam bei Videos < 2 Tage ein
+  Probeladen der HLS-Formate, das die Vorab-Werbung abwartet (+ Werbelänge, z. B. 6 s) → `no-check-formats` im Login-Weg.
+  Schnell (~1 s) ist nur der anonyme Weg; der geht erst wieder, wenn die Bot-Sperre der IP abläuft.
   `main.rs` hängt Programmordner, `~/.local/bin`, `~/.cargo/bin`, Homebrew an PATH (Finder/Startmenü kennen sie nicht).
   Browser-Login wird auch in macOS-/Windows-Profilordnern gesucht (`COOKIES`).
 - Liken ist bewusst nicht eingebaut.
